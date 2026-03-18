@@ -10,7 +10,7 @@ from .service import KitchenService
 
 def create_app():
     try:
-        from fastapi import FastAPI, Query
+        from fastapi import FastAPI, HTTPException, Query
         from pydantic import BaseModel, Field
     except ModuleNotFoundError as exc:
         raise RuntimeError(
@@ -42,6 +42,25 @@ def create_app():
     class FallbackSearchRequestBody(BaseRequest):
         preferred_ingredients: Optional[list[str]] = None
         reason: Optional[str] = None
+
+    class RecipeIngredientInput(BaseModel):
+        name: str
+        quantity: Optional[float] = None
+        unit: Optional[str] = None
+        optional: bool = False
+
+    class RecipeCreateRequest(BaseRequest):
+        recipe_id: Optional[str] = None
+        title: Optional[str] = None
+        title_translations: dict[str, str]
+        tags: list[str] = []
+        proficiency: str = "established"
+        source_type: str = "personal"
+        ingredients: list[RecipeIngredientInput]
+        condiments: list[str] = []
+        steps: list[dict[str, str]]
+        macro_summary: dict[str, str]
+        search_hints: list[str] = []
 
     class ServiceResponse(BaseModel):
         status: str
@@ -222,6 +241,66 @@ def create_app():
             household_id=request.household_id,
             preferred_ingredients=request.preferred_ingredients,
             reason=request.reason,
+        )
+        return {
+            "status": result.status,
+            "locale": result.locale,
+            "language": result.language,
+            "response_markdown": result.response_markdown,
+            "data": result.data,
+        }
+
+    @app.get("/recipes", response_model=ServiceResponse)
+    def list_recipes(
+        locale: Optional[str] = Query(None),
+        language: Optional[str] = Query("en"),
+        tag: Optional[str] = Query(None),
+        category: Optional[str] = Query(None),
+    ) -> dict[str, Any]:
+        resolved_locale = request_locale(locale, language)
+        result = service.list_recipes(
+            locale=resolved_locale,
+            language=language,
+            tag=tag,
+            category=category,
+        )
+        return {
+            "status": result.status,
+            "locale": result.locale,
+            "language": result.language,
+            "response_markdown": result.response_markdown,
+            "data": result.data,
+        }
+
+    @app.post("/recipes", response_model=ServiceResponse)
+    def create_recipe(request: RecipeCreateRequest) -> dict[str, Any]:
+        resolved_locale = request_locale(request.locale, request.language)
+        payload = request.model_dump()
+        payload["ingredients"] = [
+            item.model_dump(exclude_none=True) for item in request.ingredients
+        ]
+        try:
+            result = service.create_recipe(
+                recipe_payload=payload,
+                locale=resolved_locale,
+                language=request.language,
+            )
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        return {
+            "status": result.status,
+            "locale": result.locale,
+            "language": result.language,
+            "response_markdown": result.response_markdown,
+            "data": result.data,
+        }
+
+    @app.post("/recipes/reload", response_model=ServiceResponse)
+    def reload_recipes(request: BaseRequest) -> dict[str, Any]:
+        resolved_locale = request_locale(request.locale, request.language)
+        result = service.reload_recipes(
+            locale=resolved_locale,
+            language=request.language,
         )
         return {
             "status": result.status,

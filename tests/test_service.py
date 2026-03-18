@@ -43,6 +43,17 @@ class KitchenServiceTestCase(unittest.TestCase):
             checked_in_at=datetime(2026, 3, 18, 9, 0, 0),
         )
 
+    def _make_recipe_service(self) -> KitchenService:
+        recipe_dir = Path(self.temp_dir.name) / "recipes"
+        recipe_dir.mkdir(parents=True, exist_ok=True)
+        return KitchenService(
+            Settings(
+                database_path=Path(self.temp_dir.name) / f"recipes-{len(list(recipe_dir.glob('*.json')))}.db",
+                recipes_dir=recipe_dir,
+                pantry_thresholds_path=ROOT / "data" / "pantry_thresholds.json",
+            )
+        )
+
     def test_locale_resolution(self) -> None:
         self.assertEqual(resolve_locale("en"), "en")
         self.assertEqual(resolve_locale("en-US"), "en")
@@ -225,6 +236,110 @@ class KitchenServiceTestCase(unittest.TestCase):
         self.assertEqual(result.locale, "zh-Hans")
         self.assertEqual(result.language, "zh")
         self.assertIn("当前库存", result.response_markdown)
+
+    def test_create_recipe_and_list_by_meal_prep_tag(self) -> None:
+        service = self._make_recipe_service()
+        create_result = service.create_recipe(
+            recipe_payload={
+                "title_translations": {
+                    "en": "Lemon Chicken Prep",
+                    "zh": "柠檬鸡肉备餐",
+                },
+                "tags": ["meal prep", "personal"],
+                "proficiency": "established",
+                "source_type": "personal",
+                "ingredients": [
+                    {"name": "chicken breast", "quantity": 1, "unit": "piece"},
+                    {"name": "broccoli", "quantity": 1, "unit": "piece"},
+                ],
+                "condiments": ["soy sauce", "salt"],
+                "steps": [
+                    {"en": "Season and sear the chicken.", "zh": "调味后煎鸡肉。"},
+                    {"en": "Cook broccoli and portion for the week.", "zh": "炒西兰花并分装。"},
+                ],
+                "macro_summary": {
+                    "protein": "high",
+                    "fiber": "medium",
+                    "fats": "low",
+                },
+                "search_hints": ["meal prep"],
+            },
+            language="en",
+        )
+        self.assertEqual(create_result.status, "ok")
+        recipe = create_result.data["recipe"]
+        self.assertEqual(recipe["recipe_id"], "lemon-chicken-prep")
+        self.assertIn("meal-prep", recipe["tags"])
+        self.assertTrue((service.settings.recipes_dir / "lemon-chicken-prep.json").exists())
+
+        list_result = service.list_recipes(tag="meal prep", language="zh")
+        self.assertEqual(list_result.data["filter_tag"], "meal-prep")
+        self.assertEqual(len(list_result.data["recipes"]), 1)
+        self.assertEqual(list_result.data["recipes"][0]["title"], "柠檬鸡肉备餐")
+
+        category_result = service.list_recipes(category="meal-prep")
+        self.assertEqual(len(category_result.data["recipes"]), 1)
+
+    def test_reload_recipes_picks_up_new_file(self) -> None:
+        service = self._make_recipe_service()
+        before = service.list_recipes()
+        self.assertEqual(before.data["recipes"], [])
+
+        (service.settings.recipes_dir / "manual-prep.json").write_text(
+            json.dumps(
+                {
+                    "recipe_id": "manual-prep",
+                    "title": "Manual Prep",
+                    "title_translations": {
+                        "en": "Manual Prep",
+                        "zh": "手动备餐",
+                    },
+                    "language": "en",
+                    "tags": ["meal prep"],
+                    "proficiency": "established",
+                    "source_type": "personal",
+                    "ingredients": [{"name": "rice", "quantity": 1, "unit": "kg"}],
+                    "condiments": ["salt"],
+                    "steps": [{"en": "Cook and portion.", "zh": "煮好后分装。"}],
+                    "macro_summary": {
+                        "protein": "low",
+                        "fiber": "low",
+                        "fats": "low",
+                    },
+                    "search_hints": [],
+                },
+                ensure_ascii=False,
+                indent=2,
+            )
+            + "\n",
+            encoding="utf-8",
+        )
+
+        reload_result = service.reload_recipes(language="en")
+        self.assertEqual(reload_result.status, "ok")
+        self.assertEqual(reload_result.data["recipe_count"], 1)
+
+        after = service.list_recipes(tag="meal prep")
+        self.assertEqual(len(after.data["recipes"]), 1)
+        self.assertEqual(after.data["recipes"][0]["recipe_id"], "manual-prep")
+
+    def test_create_recipe_requires_bilingual_content(self) -> None:
+        service = self._make_recipe_service()
+        with self.assertRaises(ValueError):
+            service.create_recipe(
+                recipe_payload={
+                    "title_translations": {"en": "Broken Recipe"},
+                    "tags": ["meal prep"],
+                    "ingredients": [{"name": "rice", "quantity": 1, "unit": "kg"}],
+                    "condiments": [],
+                    "steps": [{"en": "Cook rice."}],
+                    "macro_summary": {
+                        "protein": "low",
+                        "fiber": "low",
+                        "fats": "low",
+                    },
+                }
+            )
 
 
 if __name__ == "__main__":

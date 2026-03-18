@@ -24,7 +24,7 @@ from .i18n import (
     t,
 )
 from .parser import coerce_external_item, parse_checkin_text
-from .recipes import RecipeRepository
+from .recipes import RecipeRepository, normalize_recipe_tag
 from .types import (
     AlertItem,
     InventoryBatch,
@@ -43,7 +43,7 @@ class KitchenService:
         self.db = Database(self.settings.database_path)
         self.recipe_repository = RecipeRepository(self.settings.recipes_dir)
         self._sync_thresholds()
-        self.db.replace_recipe_cache(self.recipe_repository.recipes)
+        self._refresh_recipe_index()
 
     def _sync_thresholds(self) -> None:
         thresholds_path = self.settings.pantry_thresholds_path
@@ -54,6 +54,9 @@ class KitchenService:
         else:
             thresholds = list(DEFAULT_PANTRY_THRESHOLDS)
         self.db.replace_thresholds(thresholds)
+
+    def _refresh_recipe_index(self) -> None:
+        self.db.replace_recipe_cache(self.recipe_repository.recipes)
 
     def _resolve_locale(
         self,
@@ -109,6 +112,24 @@ class KitchenService:
             "expiration_date": format_date(batch.expiration_date),
             "recommended_use_by": format_date(batch.recommended_use_by),
             "uncertain": batch.uncertain,
+        }
+
+    def _serialize_recipe(self, recipe, locale: LocaleCode) -> dict[str, object]:
+        localized_recipe, warnings = localize_recipe(recipe, locale)
+        return {
+            "recipe_id": recipe.recipe_id,
+            "title": localized_recipe.title if localized_recipe else recipe.title,
+            "tags": recipe.tags,
+            "proficiency": recipe.proficiency,
+            "source_type": recipe.source_type,
+            "ingredients": [asdict(item) for item in recipe.ingredients],
+            "condiments": recipe.condiments,
+            "steps": localized_recipe.steps if localized_recipe else [],
+            "macro_summary": asdict(recipe.macro_summary),
+            "search_hints": recipe.search_hints,
+            "path": str(recipe.path),
+            "supports_locale": localized_recipe is not None,
+            "localization_warnings": [asdict(item) for item in warnings],
         }
 
     def _batches_to_summary(
@@ -819,4 +840,112 @@ class KitchenService:
             locale=resolved_locale,
             response_markdown=bulletize([t(resolved_locale, "fallback.line")]),
             data={"search_request": request},
+        )
+
+    def list_recipes(
+        self,
+        locale: Optional[str] = None,
+        language: Optional[str] = "en",
+        tag: Optional[str] = None,
+        category: Optional[str] = None,
+    ) -> ServiceResult:
+        resolved_locale = self._resolve_locale(locale, language)
+        recipe_tag = tag or category
+        recipes = self.recipe_repository.list_recipes(
+            locale=resolved_locale,
+            tag=recipe_tag,
+        )
+        serialized_recipes = [
+            self._serialize_recipe(recipe, resolved_locale) for recipe in recipes
+        ]
+        return self._result(
+            status="ok",
+            locale=resolved_locale,
+            response_markdown=bulletize(
+                [
+                    t(
+                        resolved_locale,
+                        "recipes.list_line_with_tags",
+                        title=item["title"],
+                        tags=join_display_list(resolved_locale, item["tags"]),
+                    )
+                    if item["tags"]
+                    else t(resolved_locale, "recipes.list_line", title=item["title"])
+                    for item in serialized_recipes
+                ]
+                or [t(resolved_locale, "recipes.none")]
+            ),
+            data={
+                "recipes": serialized_recipes,
+                "filter_tag": normalize_recipe_tag(recipe_tag) if recipe_tag else None,
+                "localization_warnings": [
+                    asdict(warning)
+                    for warning in self.recipe_repository.warnings_for_locale(resolved_locale)
+                ],
+            },
+        )
+
+    def create_recipe(
+        self,
+        recipe_payload: dict[str, object],
+        locale: Optional[str] = None,
+        language: Optional[str] = "en",
+    ) -> ServiceResult:
+        resolved_locale = self._resolve_locale(locale, language)
+        recipe = self.recipe_repository.create_recipe(recipe_payload)
+        self._refresh_recipe_index()
+        serialized = self._serialize_recipe(recipe, resolved_locale)
+        return self._result(
+            status="ok",
+            locale=resolved_locale,
+            response_markdown=bulletize(
+                [
+                    t(
+                        resolved_locale,
+                        "recipes.created",
+                        title=serialized["title"],
+                    ),
+                    t(
+                        resolved_locale,
+                        "recipes.list_line_with_tags",
+                        title=serialized["title"],
+                        tags=join_display_list(resolved_locale, serialized["tags"]),
+                    )
+                    if serialized["tags"]
+                    else t(resolved_locale, "recipes.list_line", title=serialized["title"])
+                ]
+            ),
+            data={"recipe": serialized},
+        )
+
+    def reload_recipes(
+        self,
+        locale: Optional[str] = None,
+        language: Optional[str] = "en",
+    ) -> ServiceResult:
+        resolved_locale = self._resolve_locale(locale, language)
+        recipes = self.recipe_repository.reload()
+        self._refresh_recipe_index()
+        recipe_count = len(recipes)
+        warning_count = len(self.recipe_repository.warnings_for_locale(resolved_locale))
+        return self._result(
+            status="ok",
+            locale=resolved_locale,
+            response_markdown=bulletize(
+                [
+                    t(
+                        resolved_locale,
+                        "recipes.reload",
+                        count=recipe_count,
+                        warnings=warning_count,
+                    )
+                ]
+            ),
+            data={
+                "recipe_count": recipe_count,
+                "localization_warnings": [
+                    asdict(warning)
+                    for warning in self.recipe_repository.warnings_for_locale(resolved_locale)
+                ],
+            },
         )

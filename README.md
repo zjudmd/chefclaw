@@ -31,6 +31,9 @@ uvicorn chef_claw.api:create_app --factory --reload
 - `POST /plan/weekend`
 - `POST /alerts/expiry`
 - `POST /alerts/restock`
+- `GET /recipes`
+- `POST /recipes`
+- `POST /recipes/reload`
 - `POST /recipes/fallback-search-request`
 
 ## Local Data
@@ -43,4 +46,7 @@ uvicorn chef_claw.api:create_app --factory --reload
 
 - Responses are concise and mobile-oriented.
 - Language is mirrored from the `language` field supplied by OpenClaw.
+- `locale` is the preferred request field; `language` remains supported for compatibility.
 - Web search is not performed in-process. The service returns structured search requests when local recipes are insufficient.
+- Recipe creation is file-backed. `POST /recipes` writes a new `recipes/*.json` file and refreshes the in-memory index.
+- Recipe listing supports `tag` or `category` filters; values like `meal prep` are normalized to `meal-prep`.
