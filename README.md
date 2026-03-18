@@ -1,4 +1,8 @@
-# Chef Claw
+# Chef Claw 🍳🦞
+
+<p align="center">
+  <img src="assets/chefclaw_avatar.jpg" alt="Chef Claw avatar" width="280">
+</p>
 
 Local kitchen assistant service for OpenClaw. The service manages household inventory, recipe selection, alert generation, and grocery planning while OpenClaw owns messaging, scheduling, and online search.
 
@@ -103,3 +107,7 @@ Validation rules:
 - Web search is not performed in-process. The service returns structured search requests when local recipes are insufficient.
 - Recipe familiarity is represented by `source_type: "personal"` and `proficiency: "established"`.
 - `meal-prep` is supported as a tag/category filter for listing, but planning does not yet filter or rank recipes by tag.
+
+## License
+
+MIT. See `LICENSE`.

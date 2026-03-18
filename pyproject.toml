@@ -8,6 +8,7 @@ version = "0.1.0"
 description = "Local kitchen assistant service for OpenClaw."
 readme = "README.md"
 requires-python = ">=3.9"
+license = {text = "MIT"}
 dependencies = [
   "fastapi>=0.115,<1.0",
   "pydantic>=2.7,<3.0",
