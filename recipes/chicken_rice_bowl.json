@@ -1,0 +1,29 @@
+{
+  "recipe_id": "chicken-rice-bowl",
+  "title": "Chicken Rice Bowl",
+  "title_translations": {
+    "en": "Chicken Rice Bowl",
+    "zh": "鸡肉盖饭"
+  },
+  "language": "en",
+  "tags": ["meal-prep", "balanced", "personal"],
+  "proficiency": "established",
+  "source_type": "personal",
+  "ingredients": [
+    {"name": "chicken breast", "quantity": 1, "unit": "piece"},
+    {"name": "rice", "quantity": 1, "unit": "kg"},
+    {"name": "broccoli", "quantity": 1, "unit": "piece", "optional": true}
+  ],
+  "condiments": ["soy sauce", "sesame oil", "salt"],
+  "steps": [
+    {"en": "Cook rice and slice the chicken breast thinly.", "zh": "先煮饭，再把鸡胸肉切片。"},
+    {"en": "Pan-sear the chicken with soy sauce and a little sesame oil.", "zh": "平底锅煎鸡肉，加入酱油和少量香油调味。"},
+    {"en": "Serve the chicken over rice with broccoli on the side.", "zh": "把鸡肉铺在米饭上，配西兰花一起吃。"}
+  ],
+  "macro_summary": {
+    "protein": "high",
+    "fiber": "medium",
+    "fats": "medium"
+  },
+  "search_hints": ["meal prep bowl"]
+}

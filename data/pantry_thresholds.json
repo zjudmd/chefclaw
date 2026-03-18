@@ -1,0 +1,50 @@
+[
+  {
+    "canonical_name": "milk",
+    "display_name_en": "Milk",
+    "display_name_zh": "牛奶",
+    "threshold_quantity": 1,
+    "unit": "carton",
+    "category": "dairy"
+  },
+  {
+    "canonical_name": "egg",
+    "display_name_en": "Egg",
+    "display_name_zh": "鸡蛋",
+    "threshold_quantity": 6,
+    "unit": "piece",
+    "category": "protein"
+  },
+  {
+    "canonical_name": "rice",
+    "display_name_en": "Rice",
+    "display_name_zh": "大米",
+    "threshold_quantity": 1,
+    "unit": "kg",
+    "category": "staple"
+  },
+  {
+    "canonical_name": "soy sauce",
+    "display_name_en": "Soy Sauce",
+    "display_name_zh": "酱油",
+    "threshold_quantity": 1,
+    "unit": "bottle",
+    "category": "condiment"
+  },
+  {
+    "canonical_name": "cooking oil",
+    "display_name_en": "Cooking Oil",
+    "display_name_zh": "食用油",
+    "threshold_quantity": 1,
+    "unit": "bottle",
+    "category": "condiment"
+  },
+  {
+    "canonical_name": "salt",
+    "display_name_en": "Salt",
+    "display_name_zh": "盐",
+    "threshold_quantity": 1,
+    "unit": "pack",
+    "category": "condiment"
+  }
+]

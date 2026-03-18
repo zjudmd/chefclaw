@@ -1,0 +1,28 @@
+{
+  "recipe_id": "garlic-spinach",
+  "title": "Garlic Spinach",
+  "title_translations": {
+    "en": "Garlic Spinach",
+    "zh": "蒜蓉菠菜"
+  },
+  "language": "en",
+  "tags": ["vegetable", "quick", "personal"],
+  "proficiency": "established",
+  "source_type": "personal",
+  "ingredients": [
+    {"name": "spinach", "quantity": 1, "unit": "bag"},
+    {"name": "garlic", "quantity": 4, "unit": "piece"}
+  ],
+  "condiments": ["cooking oil", "salt"],
+  "steps": [
+    {"en": "Slice the garlic and wash the spinach well.", "zh": "蒜切片，菠菜洗净沥干。"},
+    {"en": "Cook the garlic in a little oil until fragrant.", "zh": "少油下锅，把蒜片炒香。"},
+    {"en": "Add spinach, season with salt, and cook until just wilted.", "zh": "放入菠菜和盐，大火炒到刚刚变软。"}
+  ],
+  "macro_summary": {
+    "protein": "low",
+    "fiber": "high",
+    "fats": "low"
+  },
+  "search_hints": ["simple side dish"]
+}

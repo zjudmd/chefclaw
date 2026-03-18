@@ -1,0 +1,29 @@
+{
+  "recipe_id": "tomato-egg-stir-fry",
+  "title": "Tomato Egg Stir-Fry",
+  "title_translations": {
+    "en": "Tomato Egg Stir-Fry",
+    "zh": "番茄炒蛋"
+  },
+  "language": "en",
+  "tags": ["weeknight", "quick", "personal"],
+  "proficiency": "established",
+  "source_type": "personal",
+  "ingredients": [
+    {"name": "tomato", "quantity": 2, "unit": "piece"},
+    {"name": "egg", "quantity": 3, "unit": "piece"},
+    {"name": "scallion", "quantity": 1, "unit": "bunch", "optional": true}
+  ],
+  "condiments": ["cooking oil", "salt"],
+  "steps": [
+    {"en": "Whisk the eggs and cut the tomatoes into wedges.", "zh": "先把鸡蛋打散，再把番茄切块。"},
+    {"en": "Scramble the eggs until just set, then remove.", "zh": "热锅炒蛋至刚凝固后盛出。"},
+    {"en": "Cook tomatoes until juicy, return eggs, then season with salt and scallion.", "zh": "把番茄炒出汁，再回锅鸡蛋，最后加盐和葱即可。"}
+  ],
+  "macro_summary": {
+    "protein": "medium",
+    "fiber": "low",
+    "fats": "medium"
+  },
+  "search_hints": ["Chinese home cooking", "video tutorial"]
+}

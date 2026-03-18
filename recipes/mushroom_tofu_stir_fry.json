@@ -1,0 +1,29 @@
+{
+  "recipe_id": "mushroom-tofu-stir-fry",
+  "title": "Mushroom Tofu Stir-Fry",
+  "title_translations": {
+    "en": "Mushroom Tofu Stir-Fry",
+    "zh": "蘑菇豆腐小炒"
+  },
+  "language": "en",
+  "tags": ["vegetarian", "personal", "weeknight"],
+  "proficiency": "established",
+  "source_type": "personal",
+  "ingredients": [
+    {"name": "mushroom", "quantity": 1, "unit": "bag"},
+    {"name": "tofu", "quantity": 1, "unit": "box"},
+    {"name": "scallion", "quantity": 1, "unit": "bunch", "optional": true}
+  ],
+  "condiments": ["soy sauce", "cooking oil", "salt"],
+  "steps": [
+    {"en": "Pat the tofu dry and slice the mushrooms.", "zh": "豆腐擦干切块，蘑菇切片。"},
+    {"en": "Brown the tofu first, then add mushrooms and scallion.", "zh": "先把豆腐煎上色，再加入蘑菇和葱。"},
+    {"en": "Finish with soy sauce and salt for a quick stir-fry.", "zh": "最后加酱油和盐，快速翻炒收汁。"}
+  ],
+  "macro_summary": {
+    "protein": "medium",
+    "fiber": "medium",
+    "fats": "medium"
+  },
+  "search_hints": ["vegetarian stir fry"]
+}
