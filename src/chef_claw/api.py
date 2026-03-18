@@ -39,6 +39,19 @@ def create_app():
     class ExpiryAlertRequest(BaseRequest):
         days_threshold: int = 2
 
+    class InventoryConsumeRequest(BaseRequest):
+        item_name: str
+        quantity: float
+        unit: Optional[str] = None
+
+    class BatchUpdateRequest(BaseRequest):
+        name: Optional[str] = None
+        quantity: Optional[float] = None
+        unit: Optional[str] = None
+        expiration_date: Optional[date] = None
+        checked_in_at: Optional[datetime] = None
+        source_text: Optional[str] = None
+
     class FallbackSearchRequestBody(BaseRequest):
         preferred_ingredients: Optional[list[str]] = None
         reason: Optional[str] = None
@@ -157,6 +170,79 @@ def create_app():
             language=language,
             household_id=household_id,
         )
+        return {
+            "status": result.status,
+            "locale": result.locale,
+            "language": result.language,
+            "response_markdown": result.response_markdown,
+            "data": result.data,
+        }
+
+    @app.post("/inventory/consume", response_model=ServiceResponse)
+    def inventory_consume(request: InventoryConsumeRequest) -> dict[str, Any]:
+        resolved_locale = request_locale(request.locale, request.language)
+        try:
+            result = service.consume_inventory(
+                item_name=request.item_name,
+                quantity=request.quantity,
+                unit=request.unit,
+                locale=resolved_locale,
+                language=request.language,
+                household_id=request.household_id,
+            )
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        return {
+            "status": result.status,
+            "locale": result.locale,
+            "language": result.language,
+            "response_markdown": result.response_markdown,
+            "data": result.data,
+        }
+
+    @app.patch("/inventory/batches/{batch_id}", response_model=ServiceResponse)
+    def update_inventory_batch(
+        batch_id: int,
+        request: BatchUpdateRequest,
+    ) -> dict[str, Any]:
+        resolved_locale = request_locale(request.locale, request.language)
+        try:
+            result = service.update_inventory_batch(
+                batch_id=batch_id,
+                batch_patch=request.model_dump(exclude_unset=True, exclude={"locale", "language", "household_id"}),
+                locale=resolved_locale,
+                language=request.language,
+                household_id=request.household_id,
+            )
+        except LookupError as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        return {
+            "status": result.status,
+            "locale": result.locale,
+            "language": result.language,
+            "response_markdown": result.response_markdown,
+            "data": result.data,
+        }
+
+    @app.delete("/inventory/batches/{batch_id}", response_model=ServiceResponse)
+    def delete_inventory_batch(
+        batch_id: int,
+        locale: Optional[str] = Query(None),
+        language: Optional[str] = Query("en"),
+        household_id: str = Query("default"),
+    ) -> dict[str, Any]:
+        resolved_locale = request_locale(locale, language)
+        try:
+            result = service.delete_inventory_batch(
+                batch_id=batch_id,
+                locale=resolved_locale,
+                language=language,
+                household_id=household_id,
+            )
+        except LookupError as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
         return {
             "status": result.status,
             "locale": result.locale,

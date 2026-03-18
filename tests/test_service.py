@@ -4,7 +4,7 @@ import json
 import sys
 import tempfile
 import unittest
-from datetime import datetime
+from datetime import date, datetime
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -119,6 +119,72 @@ class KitchenServiceTestCase(unittest.TestCase):
         inventory = self.service.get_inventory()
         tomato = next(item for item in inventory.data["items"] if item["canonical_name"] == "tomato")
         self.assertEqual(tomato["quantity"], 3)
+        self.assertEqual(len(tomato["batch_ids"]), 2)
+        self.assertEqual(len(inventory.data["batches"]), 2)
+
+    def test_consume_inventory_reduces_confirmed_stock(self) -> None:
+        first = self.service.checkin(
+            text="2 tomatoes",
+            checked_in_at=datetime(2026, 3, 18, 9, 0, 0),
+        )
+        self.service.checkin(
+            text="tomatoes 1",
+            checked_in_at=datetime(2026, 3, 18, 10, 0, 0),
+        )
+        first_batch_id = first.data["recorded_items"][0]["batch_id"]
+
+        result = self.service.consume_inventory("tomato", 2, unit="piece")
+
+        self.assertEqual(result.status, "ok")
+        self.assertEqual(result.data["deleted_batch_ids"], [first_batch_id])
+        self.assertEqual(result.data["remaining_item"]["quantity"], 1)
+        inventory = self.service.get_inventory()
+        tomato = next(item for item in inventory.data["items"] if item["canonical_name"] == "tomato")
+        self.assertEqual(tomato["quantity"], 1)
+        self.assertEqual(tomato["batch_count"], 1)
+
+    def test_consume_inventory_needs_follow_up_for_uncertain_stock(self) -> None:
+        self.service.checkin(text="spinach")
+
+        result = self.service.consume_inventory("spinach", 1)
+
+        self.assertEqual(result.status, "needs_user_input")
+        self.assertTrue(result.data["uncertain_batches"])
+        inventory = self.service.get_inventory()
+        self.assertEqual(len(inventory.data["batches"]), 1)
+
+    def test_update_inventory_batch_rewrites_batch_fields(self) -> None:
+        checkin = self.service.checkin(
+            text="spinach 1 bag",
+            checked_in_at=datetime(2026, 3, 18, 9, 0, 0),
+        )
+        batch_id = checkin.data["recorded_items"][0]["batch_id"]
+
+        result = self.service.update_inventory_batch(
+            batch_id=batch_id,
+            batch_patch={
+                "quantity": 2,
+                "expiration_date": date(2026, 3, 25),
+                "source_text": "spinach 2 bag expires 2026-03-25",
+            },
+        )
+
+        self.assertEqual(result.status, "ok")
+        batch = result.data["batch"]
+        self.assertEqual(batch["quantity"], 2)
+        self.assertEqual(batch["expiration_date"], "2026-03-25")
+        self.assertEqual(batch["recommended_use_by"], "-")
+
+    def test_delete_inventory_batch_removes_batch(self) -> None:
+        checkin = self.service.checkin(text="2 tomatoes")
+        batch_id = checkin.data["recorded_items"][0]["batch_id"]
+
+        result = self.service.delete_inventory_batch(batch_id=batch_id)
+
+        self.assertEqual(result.status, "ok")
+        inventory = self.service.get_inventory()
+        self.assertEqual(inventory.data["items"], [])
+        self.assertEqual(inventory.data["batches"], [])
 
     def test_query_vegetables_left(self) -> None:
         self.service.checkin(text="spinach 1 bag, tomato 2")

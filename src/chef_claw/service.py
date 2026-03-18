@@ -5,7 +5,12 @@ from dataclasses import asdict
 from datetime import date, datetime, timedelta
 from typing import Optional
 
-from .catalog import DEFAULT_PANTRY_THRESHOLDS, find_profile_mentioned, lookup_profile
+from .catalog import (
+    DEFAULT_PANTRY_THRESHOLDS,
+    find_profile_mentioned,
+    lookup_profile,
+    normalize_unit,
+)
 from .config import Settings, get_settings
 from .db import Database
 from .i18n import (
@@ -132,6 +137,38 @@ class KitchenService:
             "localization_warnings": [asdict(item) for item in warnings],
         }
 
+    def _filtered_batches(
+        self,
+        household_id: str,
+        category: Optional[str] = None,
+        expiring_within_days: Optional[int] = None,
+        only_available: bool = True,
+        canonical_name: Optional[str] = None,
+    ) -> list[InventoryBatch]:
+        today = self._today()
+        batches: list[InventoryBatch] = []
+        for batch in self.db.list_batches(household_id):
+            relevant_date = batch.relevant_date
+            if only_available and relevant_date and relevant_date < today:
+                continue
+            if only_available and batch.quantity is not None and batch.quantity <= 0:
+                continue
+            if canonical_name and batch.canonical_name != canonical_name:
+                continue
+            if category and batch.category != category and batch.item_group != category:
+                continue
+            if expiring_within_days is not None:
+                if relevant_date is None or relevant_date > today + timedelta(days=expiring_within_days):
+                    continue
+            batches.append(batch)
+        return batches
+
+    def _get_batch_or_raise(self, batch_id: int, household_id: str) -> InventoryBatch:
+        batch = self.db.get_batch(batch_id, household_id)
+        if batch is None:
+            raise LookupError(f"Batch {batch_id} was not found for household '{household_id}'.")
+        return batch
+
     def _batches_to_summary(
         self,
         household_id: str,
@@ -142,12 +179,13 @@ class KitchenService:
     ) -> list[InventorySummaryItem]:
         today = self._today()
         summary: dict[str, InventorySummaryItem] = {}
-        for batch in self.db.list_batches(household_id):
+        for batch in self._filtered_batches(
+            household_id=household_id,
+            category=category,
+            expiring_within_days=expiring_within_days,
+            only_available=only_available,
+        ):
             relevant_date = batch.relevant_date
-            if only_available and relevant_date and relevant_date < today:
-                continue
-            if category and batch.category != category and batch.item_group != category:
-                continue
             existing = summary.get(batch.canonical_name)
             if not existing:
                 summary[batch.canonical_name] = InventorySummaryItem(
@@ -161,12 +199,14 @@ class KitchenService:
                     unit=batch.unit,
                     uncertain=batch.uncertain,
                     batch_count=1,
+                    batch_ids=[batch.batch_id],
                     expires_on=relevant_date,
                     expiring_soon=False,
                 )
                 continue
 
             existing.batch_count += 1
+            existing.batch_ids.append(batch.batch_id)
             existing.uncertain = existing.uncertain or batch.uncertain
             if existing.unit != batch.unit:
                 existing.total_quantity = None
@@ -212,6 +252,7 @@ class KitchenService:
             "quantity_label": stock_label(locale, item.uncertain, item.total_quantity, item.unit),
             "uncertain": item.uncertain,
             "batch_count": item.batch_count,
+            "batch_ids": item.batch_ids,
             "expires_on": format_date(item.expires_on),
             "expiring_soon": item.expiring_soon,
             "low_stock": item.low_stock,
@@ -474,6 +515,12 @@ class KitchenService:
         only_available: bool = True,
     ) -> ServiceResult:
         resolved_locale = self._resolve_locale(locale, language)
+        batches = self._filtered_batches(
+            household_id=household_id,
+            category=category,
+            expiring_within_days=expiring_within_days,
+            only_available=only_available,
+        )
         items = self._batches_to_summary(
             household_id=household_id,
             locale=resolved_locale,
@@ -500,7 +547,10 @@ class KitchenService:
             status="ok",
             locale=resolved_locale,
             response_markdown=f"**{t(resolved_locale, 'inventory.header')}**\n{bulletize(lines)}",
-            data={"items": [self._summary_to_payload(item, resolved_locale) for item in items]},
+            data={
+                "items": [self._summary_to_payload(item, resolved_locale) for item in items],
+                "batches": [self._serialize_batch(batch, resolved_locale) for batch in batches],
+            },
         )
 
     def query_inventory(
@@ -577,6 +627,355 @@ class KitchenService:
             locale=resolved_locale,
             response_markdown=bulletize(lines),
             data={"items": [self._summary_to_payload(item, resolved_locale) for item in filtered]},
+        )
+
+    def consume_inventory(
+        self,
+        item_name: str,
+        quantity: float,
+        unit: Optional[str] = None,
+        locale: Optional[str] = None,
+        language: Optional[str] = "en",
+        household_id: str = "default",
+    ) -> ServiceResult:
+        resolved_locale = self._resolve_locale(locale, language)
+        if quantity <= 0:
+            raise ValueError("quantity must be greater than 0")
+
+        normalized_unit = normalize_unit(unit)
+        profile = lookup_profile(item_name, normalized_unit)
+        all_batches = self._filtered_batches(
+            household_id=household_id,
+            only_available=True,
+            canonical_name=profile.canonical_name,
+        )
+
+        if not all_batches:
+            return self._result(
+                status="needs_user_input",
+                locale=resolved_locale,
+                response_markdown=bulletize(
+                    [t(resolved_locale, "inventory.consume_no_match", name=profile.display_name(resolved_locale))]
+                ),
+                data={
+                    "item": profile.canonical_name,
+                    "requested_quantity": quantity,
+                    "unit": normalized_unit,
+                    "consumed_from_batches": [],
+                    "updated_batches": [],
+                    "deleted_batch_ids": [],
+                    "uncertain_batches": [],
+                },
+            )
+
+        if normalized_unit is None:
+            known_units = {
+                batch.unit
+                for batch in all_batches
+                if batch.quantity is not None and not batch.uncertain
+            }
+            if len(known_units) > 1:
+                raise ValueError("unit is required when the item exists in multiple units")
+            match_unit = next(iter(known_units), None) if known_units else None
+        else:
+            match_unit = normalized_unit
+            if normalized_unit == "piece":
+                explicit_piece_batches = [
+                    batch
+                    for batch in all_batches
+                    if not batch.uncertain and batch.quantity is not None and batch.unit == normalized_unit
+                ]
+                unitless_count_batches = [
+                    batch
+                    for batch in all_batches
+                    if not batch.uncertain and batch.quantity is not None and batch.unit is None
+                ]
+                if not explicit_piece_batches and unitless_count_batches:
+                    match_unit = None
+
+        uncertain_batches = [
+            batch
+            for batch in all_batches
+            if batch.uncertain or batch.quantity is None or batch.unit != match_unit
+        ]
+        candidates = [
+            batch
+            for batch in all_batches
+            if not batch.uncertain and batch.quantity is not None and batch.unit == match_unit
+        ]
+        candidates.sort(key=lambda batch: (batch.relevant_date or date.max, batch.checked_in_at, batch.batch_id))
+
+        confirmed_available = sum(batch.quantity or 0 for batch in candidates)
+        if confirmed_available < quantity:
+            lines = [
+                t(
+                    resolved_locale,
+                    "inventory.consume_insufficient",
+                    name=profile.display_name(resolved_locale),
+                    quantity=format_quantity(confirmed_available, normalized_unit),
+                )
+            ]
+            if uncertain_batches:
+                lines.append(
+                    t(
+                        resolved_locale,
+                        "inventory.consume_unknown_batches",
+                        name=profile.display_name(resolved_locale),
+                    )
+                )
+            return self._result(
+                status="needs_user_input",
+                locale=resolved_locale,
+                response_markdown=bulletize(lines),
+                data={
+                    "item": profile.canonical_name,
+                    "requested_quantity": quantity,
+                    "unit": normalized_unit,
+                    "confirmed_available": confirmed_available,
+                    "consumed_from_batches": [],
+                    "updated_batches": [],
+                    "deleted_batch_ids": [],
+                    "uncertain_batches": [
+                        self._serialize_batch(batch, resolved_locale) for batch in uncertain_batches
+                    ],
+                },
+            )
+
+        remaining = quantity
+        consumed_from_batches: list[dict[str, object]] = []
+        updated_batches: list[dict[str, object]] = []
+        deleted_batch_ids: list[int] = []
+        for batch in candidates:
+            if remaining <= 0:
+                break
+            consume_amount = min(batch.quantity or 0, remaining)
+            consumed_from_batches.append(
+                {
+                    "batch_id": batch.batch_id,
+                    "quantity": consume_amount,
+                    "unit": batch.unit,
+                }
+            )
+            if consume_amount >= (batch.quantity or 0):
+                self.db.delete_batch(batch.batch_id, household_id)
+                deleted_batch_ids.append(batch.batch_id)
+            else:
+                updated_batch = InventoryBatch(
+                    batch_id=batch.batch_id,
+                    household_id=batch.household_id,
+                    canonical_name=batch.canonical_name,
+                    display_name_en=batch.display_name_en,
+                    display_name_zh=batch.display_name_zh,
+                    quantity=(batch.quantity or 0) - consume_amount,
+                    unit=batch.unit,
+                    category=batch.category,
+                    item_group=batch.item_group,
+                    freshness_type=batch.freshness_type,
+                    checked_in_at=batch.checked_in_at,
+                    expiration_date=batch.expiration_date,
+                    recommended_use_by=batch.recommended_use_by,
+                    uncertain=batch.uncertain,
+                    source_text=batch.source_text,
+                )
+                self.db.update_batch(updated_batch)
+                updated_batches.append(self._serialize_batch(updated_batch, resolved_locale))
+            remaining -= consume_amount
+
+        self.db.record_event(
+            household_id,
+            "consume",
+            profile.canonical_name,
+            {
+                "item_name": item_name,
+                "quantity": quantity,
+                "unit": normalized_unit,
+                "consumed_from_batches": consumed_from_batches,
+                "deleted_batch_ids": deleted_batch_ids,
+            },
+        )
+
+        remaining_item = next(
+            (
+                item
+                for item in self._batches_to_summary(household_id, resolved_locale)
+                if item.canonical_name == profile.canonical_name
+            ),
+            None,
+        )
+        lines = [
+            t(
+                resolved_locale,
+                "inventory.consume_line",
+                name=profile.display_name(resolved_locale),
+                quantity=format_quantity(quantity, normalized_unit),
+            )
+        ]
+        if remaining_item:
+            lines.append(
+                t(
+                    resolved_locale,
+                    "inventory.item_line",
+                    name=self._name(remaining_item, resolved_locale),
+                    quantity=stock_label(
+                        resolved_locale,
+                        remaining_item.uncertain,
+                        remaining_item.total_quantity,
+                        remaining_item.unit,
+                    ),
+                )
+            )
+
+        return self._result(
+            status="ok",
+            locale=resolved_locale,
+            response_markdown=bulletize(lines),
+            data={
+                "item": profile.canonical_name,
+                "requested_quantity": quantity,
+                "unit": normalized_unit,
+                "consumed_from_batches": consumed_from_batches,
+                "updated_batches": updated_batches,
+                "deleted_batch_ids": deleted_batch_ids,
+                "remaining_item": (
+                    self._summary_to_payload(remaining_item, resolved_locale)
+                    if remaining_item
+                    else None
+                ),
+                "uncertain_batches": [
+                    self._serialize_batch(batch, resolved_locale) for batch in uncertain_batches
+                ],
+            },
+        )
+
+    def update_inventory_batch(
+        self,
+        batch_id: int,
+        batch_patch: dict[str, object],
+        locale: Optional[str] = None,
+        language: Optional[str] = "en",
+        household_id: str = "default",
+    ) -> ServiceResult:
+        if not batch_patch:
+            raise ValueError("at least one batch field must be provided")
+
+        resolved_locale = self._resolve_locale(locale, language)
+        batch = self._get_batch_or_raise(batch_id, household_id)
+
+        raw_name = str(batch_patch["name"]).strip() if "name" in batch_patch else batch.canonical_name
+        if not raw_name:
+            raise ValueError("name cannot be blank")
+
+        quantity = batch.quantity
+        uncertain = batch.uncertain
+        if "quantity" in batch_patch:
+            raw_quantity = batch_patch["quantity"]
+            if raw_quantity is None or float(raw_quantity) <= 0:
+                raise ValueError("quantity must be greater than 0")
+            quantity = float(raw_quantity)
+            uncertain = False
+
+        unit = batch.unit
+        if "unit" in batch_patch:
+            unit = normalize_unit(batch_patch["unit"])
+
+        checked_in_at = batch.checked_in_at
+        if "checked_in_at" in batch_patch and batch_patch["checked_in_at"] is not None:
+            checked_in_at = batch_patch["checked_in_at"]  # type: ignore[assignment]
+
+        expiration_date = batch.expiration_date
+        if "expiration_date" in batch_patch:
+            expiration_date = batch_patch["expiration_date"]  # type: ignore[assignment]
+
+        source_text = batch.source_text
+        if "source_text" in batch_patch and batch_patch["source_text"] is not None:
+            source_text = str(batch_patch["source_text"])
+
+        profile = lookup_profile(raw_name, unit)
+        if profile.freshness_type == "packaged" and expiration_date is None:
+            raise ValueError("packaged items require an expiration_date")
+
+        recommended_use_by = None
+        if profile.freshness_type == "fresh" and expiration_date is None:
+            recommended_use_by = self._compute_recommended_use_by(
+                profile.canonical_name,
+                profile.freshness_type,
+                checked_in_at,
+            )
+
+        updated_batch = InventoryBatch(
+            batch_id=batch.batch_id,
+            household_id=batch.household_id,
+            canonical_name=profile.canonical_name,
+            display_name_en=profile.display_name_en,
+            display_name_zh=profile.display_name_zh,
+            quantity=quantity,
+            unit=unit,
+            category=profile.category,
+            item_group=profile.item_group,
+            freshness_type=profile.freshness_type,
+            checked_in_at=checked_in_at,
+            expiration_date=expiration_date,
+            recommended_use_by=recommended_use_by,
+            uncertain=uncertain,
+            source_text=source_text,
+        )
+        self.db.update_batch(updated_batch)
+        self.db.record_event(
+            household_id,
+            "update_batch",
+            updated_batch.canonical_name,
+            {
+                "batch_id": batch_id,
+                "fields": sorted(batch_patch.keys()),
+            },
+        )
+
+        return self._result(
+            status="ok",
+            locale=resolved_locale,
+            response_markdown=bulletize(
+                [
+                    t(
+                        resolved_locale,
+                        "inventory.batch_updated",
+                        batch_id=batch_id,
+                        name=self._name(updated_batch, resolved_locale),
+                    )
+                ]
+            ),
+            data={"batch": self._serialize_batch(updated_batch, resolved_locale)},
+        )
+
+    def delete_inventory_batch(
+        self,
+        batch_id: int,
+        locale: Optional[str] = None,
+        language: Optional[str] = "en",
+        household_id: str = "default",
+    ) -> ServiceResult:
+        resolved_locale = self._resolve_locale(locale, language)
+        batch = self._get_batch_or_raise(batch_id, household_id)
+        self.db.delete_batch(batch_id, household_id)
+        self.db.record_event(
+            household_id,
+            "delete_batch",
+            batch.canonical_name,
+            {"batch_id": batch_id},
+        )
+        return self._result(
+            status="ok",
+            locale=resolved_locale,
+            response_markdown=bulletize(
+                [
+                    t(
+                        resolved_locale,
+                        "inventory.batch_deleted",
+                        batch_id=batch_id,
+                        name=self._name(batch, resolved_locale),
+                    )
+                ]
+            ),
+            data={"deleted_batch": self._serialize_batch(batch, resolved_locale)},
         )
 
     def plan_day(

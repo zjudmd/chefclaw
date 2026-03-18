@@ -106,6 +106,7 @@ class InventorySummaryItem:
     unit: Optional[str]
     uncertain: bool
     batch_count: int
+    batch_ids: list[int]
     expires_on: Optional[date]
     expiring_soon: bool
     low_stock: bool = False

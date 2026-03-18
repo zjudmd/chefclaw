@@ -32,6 +32,9 @@ uvicorn chef_claw.api:create_app --factory --reload
 - `POST /checkin`
 - `GET /inventory`
 - `GET /inventory/query`
+- `POST /inventory/consume`
+- `PATCH /inventory/batches/{id}`
+- `DELETE /inventory/batches/{id}`
 - `POST /plan/day`
 - `POST /plan/weekend`
 - `POST /alerts/expiry`
@@ -45,10 +48,45 @@ uvicorn chef_claw.api:create_app --factory --reload
 
 - Responses include both `locale` and backward-compatible `language`.
 - `locale` is the preferred request field. `language` remains supported for compatibility.
+- `GET /inventory` returns both aggregated `data.items` and batch-level `data.batches`. Use the `batch_id` values in `data.batches` or `data.items[*].batch_ids` when calling batch mutation APIs.
+- `POST /inventory/consume` consumes confirmed stock only. It will not partially consume if the confirmed quantity is insufficient, and it surfaces uncertain batches in the response for OpenClaw follow-up.
+- `PATCH /inventory/batches/{id}` corrects an existing batch in place. If the updated item is packaged, `expiration_date` is required.
+- `DELETE /inventory/batches/{id}` removes a single inventory batch.
 - `GET /recipes` supports either `tag` or `category` as a filter. Values like `meal prep`, `meal-prep`, and `meal_prep` are normalized to `meal-prep`.
 - `POST /recipes` writes a new `recipes/*.json` file and refreshes the in-memory recipe index.
 - `POST /recipes/reload` rescans the recipe directory and returns any localization warnings for the selected locale.
 - Recipe listing, planning, and reload responses may include `localization_warnings` when a recipe is incomplete for a locale.
+
+## Inventory Mutation Payloads
+
+Consume confirmed stock:
+
+```json
+{
+  "locale": "en",
+  "household_id": "default",
+  "item_name": "egg",
+  "quantity": 2,
+  "unit": "piece"
+}
+```
+
+Patch a batch:
+
+```json
+{
+  "locale": "en",
+  "household_id": "default",
+  "quantity": 8,
+  "expiration_date": "2026-03-30"
+}
+```
+
+Delete a batch:
+
+```bash
+curl -X DELETE 'http://127.0.0.1:8000/inventory/batches/12?locale=en&household_id=default'
+```
 
 ## Recipe Create Payload
 

@@ -94,6 +94,25 @@ class Database:
             connection.executescript(SCHEMA)
             connection.commit()
 
+    def _row_to_batch(self, row: sqlite3.Row) -> InventoryBatch:
+        return InventoryBatch(
+            batch_id=int(row["id"]),
+            household_id=row["household_id"],
+            canonical_name=row["canonical_name"],
+            display_name_en=row["display_name_en"],
+            display_name_zh=row["display_name_zh"],
+            quantity=row["quantity"],
+            unit=row["unit"],
+            category=row["category"],
+            item_group=row["item_group"],
+            freshness_type=row["freshness_type"],
+            checked_in_at=_parse_datetime(row["checked_in_at"]),
+            expiration_date=_parse_date(row["expiration_date"]),
+            recommended_use_by=_parse_date(row["recommended_use_by"]),
+            uncertain=bool(row["uncertain"]),
+            source_text=row["source_text"],
+        )
+
     def insert_batch(self, item: ParsedIngredient, household_id: str) -> int:
         with self._connect() as connection:
             cursor = connection.execute(
@@ -173,26 +192,72 @@ class Database:
                 """,
                 (household_id,),
             ).fetchall()
-        return [
-            InventoryBatch(
-                batch_id=int(row["id"]),
-                household_id=row["household_id"],
-                canonical_name=row["canonical_name"],
-                display_name_en=row["display_name_en"],
-                display_name_zh=row["display_name_zh"],
-                quantity=row["quantity"],
-                unit=row["unit"],
-                category=row["category"],
-                item_group=row["item_group"],
-                freshness_type=row["freshness_type"],
-                checked_in_at=_parse_datetime(row["checked_in_at"]),
-                expiration_date=_parse_date(row["expiration_date"]),
-                recommended_use_by=_parse_date(row["recommended_use_by"]),
-                uncertain=bool(row["uncertain"]),
-                source_text=row["source_text"],
+        return [self._row_to_batch(row) for row in rows]
+
+    def get_batch(self, batch_id: int, household_id: str) -> Optional[InventoryBatch]:
+        with self._connect() as connection:
+            row = connection.execute(
+                """
+                SELECT * FROM ingredient_batches
+                WHERE id = ? AND household_id = ?
+                LIMIT 1
+                """,
+                (batch_id, household_id),
+            ).fetchone()
+        if row is None:
+            return None
+        return self._row_to_batch(row)
+
+    def update_batch(self, batch: InventoryBatch) -> None:
+        with self._connect() as connection:
+            connection.execute(
+                """
+                UPDATE ingredient_batches
+                SET canonical_name = ?,
+                    display_name_en = ?,
+                    display_name_zh = ?,
+                    quantity = ?,
+                    unit = ?,
+                    category = ?,
+                    item_group = ?,
+                    freshness_type = ?,
+                    checked_in_at = ?,
+                    expiration_date = ?,
+                    recommended_use_by = ?,
+                    uncertain = ?,
+                    source_text = ?
+                WHERE id = ? AND household_id = ?
+                """,
+                (
+                    batch.canonical_name,
+                    batch.display_name_en,
+                    batch.display_name_zh,
+                    batch.quantity,
+                    batch.unit,
+                    batch.category,
+                    batch.item_group,
+                    batch.freshness_type,
+                    batch.checked_in_at.isoformat(),
+                    _serialize_date(batch.expiration_date),
+                    _serialize_date(batch.recommended_use_by),
+                    1 if batch.uncertain else 0,
+                    batch.source_text,
+                    batch.batch_id,
+                    batch.household_id,
+                ),
             )
-            for row in rows
-        ]
+            connection.commit()
+
+    def delete_batch(self, batch_id: int, household_id: str) -> None:
+        with self._connect() as connection:
+            connection.execute(
+                """
+                DELETE FROM ingredient_batches
+                WHERE id = ? AND household_id = ?
+                """,
+                (batch_id, household_id),
+            )
+            connection.commit()
 
     def replace_thresholds(self, thresholds: Iterable[PantryThreshold]) -> None:
         with self._connect() as connection:
