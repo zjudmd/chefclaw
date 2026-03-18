@@ -1,0 +1,13 @@
+[Unit]
+Description=Chef Claw local kitchen assistant API
+After=network.target
+
+[Service]
+Type=simple
+WorkingDirectory=/home/dylan/bots-ws/chefclaw
+ExecStart=/home/dylan/bots-ws/chefclaw/scripts/start-local.sh
+Restart=on-failure
+RestartSec=3
+
+[Install]
+WantedBy=default.target

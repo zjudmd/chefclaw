@@ -26,6 +26,29 @@ Or directly:
 uvicorn chef_claw.api:create_app --factory --reload
 ```
 
+Helper scripts:
+
+```bash
+./scripts/start-local.sh
+./scripts/healthcheck-local.sh
+```
+
+## Optional: run as a user service
+
+To keep Chef Claw running under your user account via systemd:
+
+```bash
+./scripts/install-user-service.sh
+```
+
+Then manage it with:
+
+```bash
+systemctl --user status chef-claw
+systemctl --user restart chef-claw
+systemctl --user stop chef-claw
+```
+
 ## API Overview
 
 - `GET /health`
