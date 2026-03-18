@@ -93,6 +93,16 @@ class KitchenServiceTestCase(unittest.TestCase):
         recorded = result.data["recorded_items"][0]
         self.assertEqual(recorded["recommended_use_by"], "2026-03-22")
 
+    def test_eggs_keep_label_date_and_recommended_use_by(self) -> None:
+        result = self.service.checkin(
+            text="egg 13 piece expires 2026-03-21",
+            checked_in_at=datetime(2026, 3, 18, 9, 0, 0),
+        )
+        recorded = result.data["recorded_items"][0]
+        self.assertEqual(recorded["label_date"], "2026-03-21")
+        self.assertEqual(recorded["recommended_use_by"], "2026-04-11")
+        self.assertEqual(recorded["label_date_kind"], "package_date")
+
     def test_packaged_item_without_expiry_needs_follow_up(self) -> None:
         result = self.service.checkin(text="milk 1 carton", locale="en-US")
         self.assertEqual(result.status, "needs_user_input")

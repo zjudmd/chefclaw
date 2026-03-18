@@ -127,10 +127,11 @@ class KitchenService:
         self,
         items: list[InventorySummaryItem],
         locale: LocaleCode,
+        household_id: str = "default",
     ) -> list[dict[str, object]]:
         groups: dict[str, list[dict[str, object]]] = {"ingredients": [], "foods": [], "other": []}
         for item in items:
-            groups[self._inventory_bucket_key(item)].append(self._summary_to_payload(item, locale))
+            groups[self._inventory_bucket_key(item)].append(self._summary_to_payload(item, locale, household_id))
         ordered = []
         for key in ("ingredients", "foods", "other"):
             if groups[key]:
@@ -181,6 +182,18 @@ class KitchenService:
             return None
         return (checked_in_at + timedelta(days=profile.default_days)).date()
 
+    def _compute_packaged_recommended_use_by(
+        self,
+        item_name: str,
+        expiration_date: Optional[date],
+    ) -> Optional[date]:
+        if expiration_date is None:
+            return None
+        lowered = item_name.lower()
+        if lowered == "egg":
+            return expiration_date + timedelta(days=21)
+        return None
+
     def _infer_storage_state(self, source_text: str) -> str:
         lowered = source_text.lower()
         if any(token in lowered for token in ("frozen", "freezer", "冷冻", "冷凍")):
@@ -217,6 +230,7 @@ class KitchenService:
             batch.expiration_date,
             batch.recommended_use_by,
         )
+        label_date_kind = "best_by" if batch.storage_state == "frozen" else "package_date"
         return {
             "batch_id": batch.batch_id,
             "name": self._name(batch, locale),
@@ -229,6 +243,8 @@ class KitchenService:
             "freshness_type": batch.freshness_type,
             "checked_in_at": batch.checked_in_at.isoformat(),
             "expiration_date": format_date(batch.expiration_date),
+            "label_date": format_date(batch.expiration_date),
+            "label_date_kind": label_date_kind,
             "recommended_use_by": format_date(batch.recommended_use_by),
             "uncertain": batch.uncertain,
             "storage_state": storage_state,
@@ -372,7 +388,16 @@ class KitchenService:
         self,
         item: InventorySummaryItem,
         locale: LocaleCode,
+        household_id: str = "default",
     ) -> dict[str, object]:
+        label_date = None
+        recommended_use_by = None
+        if item.batch_ids:
+            batch = self.db.get_batch(item.batch_ids[0], household_id)
+            if batch is not None:
+                label_date = batch.expiration_date
+                recommended_use_by = batch.recommended_use_by
+        label_date_kind = "best_by" if item.storage_state == "frozen" else "package_date"
         return {
             "name": self._name(item, locale),
             "canonical_name": item.canonical_name,
@@ -386,6 +411,9 @@ class KitchenService:
             "batch_count": item.batch_count,
             "batch_ids": item.batch_ids,
             "expires_on": format_date(item.expires_on),
+            "label_date": format_date(label_date),
+            "label_date_kind": label_date_kind,
+            "recommended_use_by": format_date(recommended_use_by),
             "expiring_soon": item.expiring_soon,
             "low_stock": item.low_stock,
             "storage_state": item.storage_state,
@@ -604,6 +632,13 @@ class KitchenService:
                     item.freshness_type,
                     item.checked_in_at,
                 )
+            elif item.expiration_date is not None:
+                packaged_recommended = self._compute_packaged_recommended_use_by(
+                    item.canonical_name,
+                    item.expiration_date,
+                )
+                if packaged_recommended is not None:
+                    item.recommended_use_by = packaged_recommended
             batch_id = self.db.insert_batch(item, household_id)
             self.db.record_event(
                 household_id,
@@ -666,13 +701,13 @@ class KitchenService:
             expiring_within_days=expiring_within_days,
             only_available=only_available,
         )
-        grouped_items = self._inventory_grouped_payload(items, resolved_locale)
+        grouped_items = self._inventory_grouped_payload(items, resolved_locale, household_id)
         return self._result(
             status="ok",
             locale=resolved_locale,
             response_markdown=self._inventory_markdown(items, resolved_locale),
             data={
-                "items": [self._summary_to_payload(item, resolved_locale) for item in items],
+                "items": [self._summary_to_payload(item, resolved_locale, household_id) for item in items],
                 "grouped_items": grouped_items,
                 "batches": [self._serialize_batch(batch, resolved_locale) for batch in batches],
             },
@@ -751,7 +786,7 @@ class KitchenService:
             status="ok",
             locale=resolved_locale,
             response_markdown=bulletize(lines),
-            data={"items": [self._summary_to_payload(item, resolved_locale) for item in filtered]},
+            data={"items": [self._summary_to_payload(item, resolved_locale, household_id) for item in filtered]},
         )
 
     def consume_inventory(
@@ -1028,6 +1063,11 @@ class KitchenService:
                 profile.canonical_name,
                 profile.freshness_type,
                 checked_in_at,
+            )
+        elif expiration_date is not None:
+            recommended_use_by = self._compute_packaged_recommended_use_by(
+                profile.canonical_name,
+                expiration_date,
             )
 
         storage_state = self._infer_storage_state(source_text)
