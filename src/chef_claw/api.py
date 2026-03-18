@@ -1,5 +1,3 @@
-from __future__ import annotations
-
 from datetime import date, datetime
 from typing import Any, Optional
 
@@ -10,7 +8,7 @@ from .service import KitchenService
 
 def create_app():
     try:
-        from fastapi import FastAPI, HTTPException, Query
+        from fastapi import Body, FastAPI, HTTPException, Query
         from pydantic import BaseModel, Field
     except ModuleNotFoundError as exc:
         raise RuntimeError(
@@ -82,6 +80,20 @@ def create_app():
         response_markdown: str
         data: dict[str, Any]
 
+    for model in (
+        ParsedItemInput,
+        CheckinRequest,
+        BaseRequest,
+        ExpiryAlertRequest,
+        InventoryConsumeRequest,
+        BatchUpdateRequest,
+        FallbackSearchRequestBody,
+        RecipeIngredientInput,
+        RecipeCreateRequest,
+        ServiceResponse,
+    ):
+        model.model_rebuild()
+
     def request_locale(locale: Optional[str], language: Optional[str]) -> str:
         return resolve_locale(locale or language)
 
@@ -108,7 +120,7 @@ def create_app():
         }
 
     @app.post("/checkin", response_model=ServiceResponse)
-    def checkin(request: CheckinRequest) -> dict[str, Any]:
+    def checkin(request: CheckinRequest = Body(...)) -> dict[str, Any]:
         resolved_locale = request_locale(request.locale, request.language)
         result = service.checkin(
             text=request.text,
@@ -382,7 +394,7 @@ def create_app():
         }
 
     @app.post("/recipes/reload", response_model=ServiceResponse)
-    def reload_recipes(request: BaseRequest) -> dict[str, Any]:
+    def reload_recipes(request: BaseRequest = Body(...)) -> dict[str, Any]:
         resolved_locale = request_locale(request.locale, request.language)
         result = service.reload_recipes(
             locale=resolved_locale,
