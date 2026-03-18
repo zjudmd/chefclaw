@@ -3,22 +3,35 @@ from __future__ import annotations
 import json
 from dataclasses import asdict
 from datetime import date, datetime, timedelta
-from pathlib import Path
 from typing import Optional
 
-from .catalog import DEFAULT_PANTRY_THRESHOLDS, INGREDIENT_PROFILES, lookup_profile
+from .catalog import DEFAULT_PANTRY_THRESHOLDS, find_profile_mentioned, lookup_profile
 from .config import Settings, get_settings
 from .db import Database
-from .formatting import bulletize, display_name, format_date, format_quantity, is_zh, stock_label
+from .i18n import (
+    bulletize,
+    build_search_query,
+    default_search_hints,
+    format_date,
+    format_quantity,
+    join_display_list,
+    legacy_language,
+    localize_name,
+    localize_recipe,
+    macro_label,
+    resolve_locale,
+    stock_label,
+    t,
+)
 from .parser import coerce_external_item, parse_checkin_text
 from .recipes import RecipeRepository
 from .types import (
     AlertItem,
     InventoryBatch,
     InventorySummaryItem,
+    LocaleCode,
     PantryThreshold,
     PlanSuggestion,
-    Recipe,
     SearchRequest,
     ServiceResult,
 )
@@ -42,34 +55,53 @@ class KitchenService:
             thresholds = list(DEFAULT_PANTRY_THRESHOLDS)
         self.db.replace_thresholds(thresholds)
 
-    def _language(self, language: str) -> str:
-        return "zh" if is_zh(language) else "en"
+    def _resolve_locale(
+        self,
+        locale: Optional[str] = None,
+        language: Optional[str] = None,
+    ) -> LocaleCode:
+        return resolve_locale(locale or language)
+
+    def _result(
+        self,
+        status: str,
+        locale: LocaleCode,
+        response_markdown: str,
+        data: dict[str, object],
+    ) -> ServiceResult:
+        return ServiceResult(
+            status=status,
+            locale=locale,
+            language=legacy_language(locale),
+            response_markdown=response_markdown,
+            data=data,
+        )
 
     def _today(self) -> date:
         return date.today()
 
-    def _name(self, obj: object, language: str) -> str:
-        return display_name(obj, self._language(language))
+    def _name(self, obj: object, locale: LocaleCode) -> str:
+        return localize_name(obj, locale)
 
-    def _compute_recommended_use_by(self, item_name: str, freshness_type: str, checked_in_at: datetime) -> Optional[date]:
+    def _compute_recommended_use_by(
+        self,
+        item_name: str,
+        freshness_type: str,
+        checked_in_at: datetime,
+    ) -> Optional[date]:
         profile = lookup_profile(item_name)
         if freshness_type != "fresh" or profile.default_days is None:
             return None
         return (checked_in_at + timedelta(days=profile.default_days)).date()
 
-    def _packaged_follow_up(self, item_name: str, language: str) -> str:
-        if self._language(language) == "zh":
-            return f"请提供 {item_name} 的到期日期。"
-        return f"Please provide the expiration date for the {item_name}."
-
-    def _serialize_batch(self, batch: InventoryBatch, language: str) -> dict[str, object]:
+    def _serialize_batch(self, batch: InventoryBatch, locale: LocaleCode) -> dict[str, object]:
         return {
             "batch_id": batch.batch_id,
-            "name": self._name(batch, language),
+            "name": self._name(batch, locale),
             "canonical_name": batch.canonical_name,
             "quantity": batch.quantity,
             "unit": batch.unit,
-            "quantity_label": stock_label(batch.uncertain, batch.quantity, batch.unit, language),
+            "quantity_label": stock_label(locale, batch.uncertain, batch.quantity, batch.unit),
             "category": batch.category,
             "item_group": batch.item_group,
             "freshness_type": batch.freshness_type,
@@ -82,7 +114,7 @@ class KitchenService:
     def _batches_to_summary(
         self,
         household_id: str,
-        language: str,
+        locale: LocaleCode,
         category: Optional[str] = None,
         expiring_within_days: Optional[int] = None,
         only_available: bool = True,
@@ -97,7 +129,7 @@ class KitchenService:
                 continue
             existing = summary.get(batch.canonical_name)
             if not existing:
-                existing = InventorySummaryItem(
+                summary[batch.canonical_name] = InventorySummaryItem(
                     canonical_name=batch.canonical_name,
                     display_name_en=batch.display_name_en,
                     display_name_zh=batch.display_name_zh,
@@ -111,21 +143,21 @@ class KitchenService:
                     expires_on=relevant_date,
                     expiring_soon=False,
                 )
-                summary[batch.canonical_name] = existing
+                continue
+
+            existing.batch_count += 1
+            existing.uncertain = existing.uncertain or batch.uncertain
+            if existing.unit != batch.unit:
+                existing.total_quantity = None
+                existing.unit = None
+            elif existing.total_quantity is not None and batch.quantity is not None:
+                existing.total_quantity += batch.quantity
             else:
-                existing.batch_count += 1
-                existing.uncertain = existing.uncertain or batch.uncertain
-                if existing.unit != batch.unit:
-                    existing.total_quantity = None
-                    existing.unit = None
-                elif existing.total_quantity is not None and batch.quantity is not None:
-                    existing.total_quantity += batch.quantity
-                else:
-                    existing.total_quantity = None
-                if relevant_date and (
-                    existing.expires_on is None or relevant_date < existing.expires_on
-                ):
-                    existing.expires_on = relevant_date
+                existing.total_quantity = None
+            if relevant_date and (
+                existing.expires_on is None or relevant_date < existing.expires_on
+            ):
+                existing.expires_on = relevant_date
 
         items = list(summary.values())
         threshold_map = {
@@ -143,16 +175,20 @@ class KitchenService:
         items.sort(key=lambda entry: (entry.expires_on or date.max, entry.canonical_name))
         return items
 
-    def _summary_to_payload(self, item: InventorySummaryItem, language: str) -> dict[str, object]:
+    def _summary_to_payload(
+        self,
+        item: InventorySummaryItem,
+        locale: LocaleCode,
+    ) -> dict[str, object]:
         return {
-            "name": self._name(item, language),
+            "name": self._name(item, locale),
             "canonical_name": item.canonical_name,
             "category": item.category,
             "item_group": item.item_group,
             "freshness_type": item.freshness_type,
             "quantity": item.total_quantity,
             "unit": item.unit,
-            "quantity_label": stock_label(item.uncertain, item.total_quantity, item.unit, language),
+            "quantity_label": stock_label(locale, item.uncertain, item.total_quantity, item.unit),
             "uncertain": item.uncertain,
             "batch_count": item.batch_count,
             "expires_on": format_date(item.expires_on),
@@ -160,7 +196,11 @@ class KitchenService:
             "low_stock": item.low_stock,
         }
 
-    def _ingredient_available(self, recipe_item_name: str, inventory_map: dict[str, InventorySummaryItem]) -> tuple[bool, bool, Optional[InventorySummaryItem]]:
+    def _ingredient_available(
+        self,
+        recipe_item_name: str,
+        inventory_map: dict[str, InventorySummaryItem],
+    ) -> tuple[bool, bool, Optional[InventorySummaryItem]]:
         profile = lookup_profile(recipe_item_name)
         item = inventory_map.get(profile.canonical_name)
         if not item:
@@ -169,23 +209,16 @@ class KitchenService:
             return False, True, item
         return item.total_quantity > 0, False, item
 
-    def _localized_recipe_title(self, recipe: Recipe, language: str) -> str:
-        lang = self._language(language)
-        return recipe.title_translations.get(lang, recipe.title)
-
-    def _localized_steps(self, recipe: Recipe, language: str) -> list[str]:
-        lang = self._language(language)
-        steps: list[str] = []
-        for step in recipe.steps:
-            steps.append(step.get(lang) or step.get("en") or next(iter(step.values())))
-        return steps
-
     def _build_suggestion(
         self,
-        recipe: Recipe,
+        recipe,
         inventory_map: dict[str, InventorySummaryItem],
-        language: str,
+        locale: LocaleCode,
     ) -> tuple[PlanSuggestion, float, float]:
+        localized_recipe, _ = localize_recipe(recipe, locale)
+        if localized_recipe is None:
+            raise ValueError(f"Recipe {recipe.recipe_id} is not localized for {locale}")
+
         missing: list[str] = []
         uncertain: list[str] = []
         matched = 0
@@ -199,12 +232,7 @@ class KitchenService:
             available, is_uncertain, inventory_item = self._ingredient_available(
                 ingredient.name, inventory_map
             )
-            ingredient_profile = lookup_profile(ingredient.name)
-            ingredient_name = (
-                ingredient_profile.display_name_zh
-                if self._language(language) == "zh"
-                else ingredient_profile.display_name_en
-            )
+            ingredient_name = lookup_profile(ingredient.name).display_name(locale)
             if available:
                 matched += 1
                 if inventory_item and inventory_item.expiring_soon:
@@ -217,12 +245,7 @@ class KitchenService:
         missing_condiments: list[str] = []
         for condiment_name in recipe.condiments:
             available, is_uncertain, _ = self._ingredient_available(condiment_name, inventory_map)
-            condiment_profile = lookup_profile(condiment_name)
-            label = (
-                condiment_profile.display_name_zh
-                if self._language(language) == "zh"
-                else condiment_profile.display_name_en
-            )
+            label = lookup_profile(condiment_name).display_name(locale)
             if not available or is_uncertain:
                 missing_condiments.append(label)
 
@@ -239,19 +262,16 @@ class KitchenService:
 
         suggestion = PlanSuggestion(
             recipe_id=recipe.recipe_id,
-            title=self._localized_recipe_title(recipe, language),
+            title=localized_recipe.title,
             source_type=recipe.source_type,
             score=round(score, 1),
             missing_ingredients=missing,
             uncertain_ingredients=uncertain,
             required_condiments=[
-                lookup_profile(name).display_name_zh
-                if self._language(language) == "zh"
-                else lookup_profile(name).display_name_en
-                for name in recipe.condiments
+                lookup_profile(name).display_name(locale) for name in recipe.condiments
             ],
             missing_condiments=missing_condiments,
-            steps=self._localized_steps(recipe, language),
+            steps=localized_recipe.steps,
             macro_summary=asdict(recipe.macro_summary),
         )
         return suggestion, coverage, score
@@ -259,31 +279,38 @@ class KitchenService:
     def _rank_recipes(
         self,
         household_id: str,
-        language: str,
+        locale: LocaleCode,
         limit: int = 2,
-    ) -> tuple[list[PlanSuggestion], list[InventorySummaryItem], list[tuple[Recipe, float, float]]]:
-        inventory = self._batches_to_summary(household_id, language)
+    ) -> tuple[list[PlanSuggestion], list[InventorySummaryItem], list[tuple[str, float, float]]]:
+        inventory = self._batches_to_summary(household_id, locale)
         inventory_map = {item.canonical_name: item for item in inventory}
-        ranked: list[tuple[Recipe, PlanSuggestion, float, float]] = []
-        for recipe in self.recipe_repository.recipes:
-            suggestion, coverage, score = self._build_suggestion(recipe, inventory_map, language)
-            ranked.append((recipe, suggestion, coverage, score))
-        ranked.sort(key=lambda item: (item[2] >= 0.6, item[3], item[0].source_type == "personal"), reverse=True)
+        ranked: list[tuple[str, PlanSuggestion, float, float]] = []
+        for recipe in self.recipe_repository.recipes_for_locale(locale):
+            suggestion, coverage, score = self._build_suggestion(recipe, inventory_map, locale)
+            ranked.append((recipe.recipe_id, suggestion, coverage, score))
+        ranked.sort(
+            key=lambda item: (item[2] >= 0.6, item[3], item[1].source_type == "personal"),
+            reverse=True,
+        )
         suggestions = [item[1] for item in ranked[:limit]]
         return suggestions, inventory, [(item[0], item[2], item[3]) for item in ranked]
 
-    def _snack_suggestions(self, suggestions: list[PlanSuggestion], language: str) -> list[str]:
+    def _snack_suggestions(
+        self,
+        suggestions: list[PlanSuggestion],
+        locale: LocaleCode,
+    ) -> list[str]:
         if not suggestions:
-            return ["苹果 + 坚果" if self._language(language) == "zh" else "apple slices + nuts"]
+            return [t(locale, "snack.apple_nuts")]
         highest = suggestions[0].macro_summary
         snacks: list[str] = []
         if highest["protein"] == "low":
-            snacks.append("无糖酸奶" if self._language(language) == "zh" else "plain yogurt")
+            snacks.append(t(locale, "snack.yogurt"))
         if highest["fiber"] in {"low", "medium"}:
-            snacks.append("苹果片" if self._language(language) == "zh" else "apple slices")
+            snacks.append(t(locale, "snack.apple"))
         if highest["fats"] == "low":
-            snacks.append("一小把坚果" if self._language(language) == "zh" else "a handful of mixed nuts")
-        return snacks or (["黄瓜条" if self._language(language) == "zh" else "cucumber sticks"])
+            snacks.append(t(locale, "snack.nuts"))
+        return snacks or [t(locale, "snack.cucumber")]
 
     def _grocery_items(self, suggestions: list[PlanSuggestion]) -> list[str]:
         items: list[str] = []
@@ -301,42 +328,44 @@ class KitchenService:
     def _fallback_request(
         self,
         household_id: str,
-        language: str,
+        locale: LocaleCode,
         reason: str,
         preferred_ingredients: Optional[list[str]] = None,
     ) -> SearchRequest:
-        inventory = self._batches_to_summary(household_id, language, expiring_within_days=3)
+        inventory = self._batches_to_summary(
+            household_id=household_id,
+            locale=locale,
+            expiring_within_days=3,
+        )
         focus = preferred_ingredients or [
-            self._name(item, language)
+            self._name(item, locale)
             for item in inventory
             if item.expiring_soon
         ][:3]
         if not focus:
-            focus = [self._name(item, language) for item in inventory[:3]]
-        lang = self._language(language)
-        if lang == "zh":
-            query = f"{' '.join(focus or ['家常菜'])} 家常做法 视频"
-        else:
-            query = f"easy home recipe video using {' '.join(focus or ['available ingredients'])}"
+            focus = [self._name(item, locale) for item in inventory[:3]]
         return SearchRequest(
-            query=query.strip(),
-            language=lang,
+            query=build_search_query(locale, focus).strip(),
+            locale=locale,
+            language=legacy_language(locale),
             reason=reason,
             require_video=True,
             preferred_sites=["YouTube", "Bilibili"],
             expected_fields=["title", "video_url", "source_url", "ingredients", "steps_summary"],
             ingredient_focus=focus,
-            search_hints=["prioritize home-style recipes", "include a concise video tutorial link"],
+            search_hints=default_search_hints(locale),
         )
 
     def checkin(
         self,
         text: str,
-        language: str = "en",
+        locale: Optional[str] = None,
+        language: Optional[str] = "en",
         household_id: str = "default",
         checked_in_at: Optional[datetime] = None,
         parsed_items: Optional[list[dict[str, object]]] = None,
     ) -> ServiceResult:
+        resolved_locale = self._resolve_locale(locale, language)
         timestamp = checked_in_at or datetime.utcnow()
         items = (
             [
@@ -360,8 +389,12 @@ class KitchenService:
             if item.freshness_type == "packaged" and item.expiration_date is None:
                 follow_ups.append(
                     {
-                        "item_name": self._name(item, language),
-                        "question": self._packaged_follow_up(self._name(item, language), language),
+                        "item_name": self._name(item, resolved_locale),
+                        "question": t(
+                            resolved_locale,
+                            "checkin.packaged_follow_up",
+                            item_name=self._name(item, resolved_locale),
+                        ),
                     }
                 )
                 continue
@@ -389,27 +422,20 @@ class KitchenService:
                 for batch in self.db.list_batches(household_id)
                 if batch.batch_id == batch_id
             )
-            recorded.append(self._serialize_batch(batch, language))
+            recorded.append(self._serialize_batch(batch, resolved_locale))
 
-        status = "needs_user_input" if follow_ups else "ok"
-        if self._language(language) == "zh":
-            lines = []
-            if recorded:
-                lines.append(f"已记录 {len(recorded)} 项库存。")
-            if follow_ups:
-                lines.append("还需要补充以下到期日期：")
-                lines.extend(question["question"] for question in follow_ups)
-        else:
-            lines = []
-            if recorded:
-                lines.append(f"Recorded {len(recorded)} inventory item(s).")
-            if follow_ups:
-                lines.append("Need expiration dates for:")
-                lines.extend(question["question"] for question in follow_ups)
+        lines: list[str] = []
+        if recorded:
+            lines.append(
+                t(resolved_locale, "checkin.recorded_count", count=len(recorded))
+            )
+        if follow_ups:
+            lines.append(t(resolved_locale, "checkin.follow_up_header"))
+            lines.extend(question["question"] for question in follow_ups)
 
-        return ServiceResult(
-            status=status,
-            language=self._language(language),
+        return self._result(
+            status="needs_user_input" if follow_ups else "ok",
+            locale=resolved_locale,
             response_markdown=bulletize(lines) if lines else "",
             data={
                 "recorded_items": recorded,
@@ -419,48 +445,53 @@ class KitchenService:
 
     def get_inventory(
         self,
-        language: str = "en",
+        locale: Optional[str] = None,
+        language: Optional[str] = "en",
         household_id: str = "default",
         category: Optional[str] = None,
         expiring_within_days: Optional[int] = None,
         only_available: bool = True,
     ) -> ServiceResult:
+        resolved_locale = self._resolve_locale(locale, language)
         items = self._batches_to_summary(
             household_id=household_id,
-            language=language,
+            locale=resolved_locale,
             category=category,
             expiring_within_days=expiring_within_days,
             only_available=only_available,
         )
-        if self._language(language) == "zh":
-            header = "当前库存"
-            lines = [
-                f"{self._name(item, language)}: {stock_label(item.uncertain, item.total_quantity, item.unit, language)}"
-                + (f" | 最晚 {format_date(item.expires_on)} 前使用" if item.expires_on else "")
-                for item in items
-            ] or ["暂无符合条件的库存。"]
-        else:
-            header = "Current inventory"
-            lines = [
-                f"{self._name(item, language)}: {stock_label(item.uncertain, item.total_quantity, item.unit, language)}"
-                + (f" | use by {format_date(item.expires_on)}" if item.expires_on else "")
-                for item in items
-            ] or ["No inventory matched the filter."]
-        return ServiceResult(
+        lines = [
+            t(
+                resolved_locale,
+                "inventory.item_line_with_date" if item.expires_on else "inventory.item_line",
+                name=self._name(item, resolved_locale),
+                quantity=stock_label(
+                    resolved_locale,
+                    item.uncertain,
+                    item.total_quantity,
+                    item.unit,
+                ),
+                date=format_date(item.expires_on),
+            )
+            for item in items
+        ] or [t(resolved_locale, "inventory.no_filter_match")]
+        return self._result(
             status="ok",
-            language=self._language(language),
-            response_markdown=f"**{header}**\n{bulletize(lines)}",
-            data={"items": [self._summary_to_payload(item, language) for item in items]},
+            locale=resolved_locale,
+            response_markdown=f"**{t(resolved_locale, 'inventory.header')}**\n{bulletize(lines)}",
+            data={"items": [self._summary_to_payload(item, resolved_locale) for item in items]},
         )
 
     def query_inventory(
         self,
         question: str,
-        language: str = "en",
+        locale: Optional[str] = None,
+        language: Optional[str] = "en",
         household_id: str = "default",
     ) -> ServiceResult:
+        resolved_locale = self._resolve_locale(locale, language)
         question_lower = question.lower()
-        inventory = self._batches_to_summary(household_id, language)
+        inventory = self._batches_to_summary(household_id, resolved_locale)
         inventory_map = {item.canonical_name: item for item in inventory}
 
         target_category = None
@@ -469,44 +500,34 @@ class KitchenService:
         elif any(token in question_lower for token in ("condiment", "condiments", "调料", "调味")):
             target_category = {"condiment"}
 
-        mentioned_profile = None
-        for profile in INGREDIENT_PROFILES:
-            aliases = {profile.canonical_name, profile.display_name_en.lower(), profile.display_name_zh.lower(), *[alias.lower() for alias in profile.synonyms]}
-            if any(alias in question_lower for alias in aliases):
-                mentioned_profile = profile
-                break
+        mentioned_profile = find_profile_mentioned(question_lower)
+        punctuation = "。" if resolved_locale == "zh-Hans" else "."
 
         if any(token in question_lower for token in ("need to buy", "buy", "买吗", "要买")) and mentioned_profile:
             item = inventory_map.get(mentioned_profile.canonical_name)
             should_buy = item is None or item.low_stock or item.uncertain
-            if self._language(language) == "zh":
-                line = f"{mentioned_profile.display_name_zh}: {'建议购买' if should_buy else '暂时不用买'}。"
-            else:
-                line = f"{mentioned_profile.display_name_en}: {'buy more soon' if should_buy else 'no need to buy yet'}."
-            return ServiceResult(
+            line = (
+                f"{mentioned_profile.display_name(resolved_locale)}: "
+                f"{t(resolved_locale, 'query.buy_yes' if should_buy else 'query.buy_no')}{punctuation}"
+            )
+            return self._result(
                 status="ok",
-                language=self._language(language),
+                locale=resolved_locale,
                 response_markdown=bulletize([line]),
                 data={"should_buy": should_buy, "item": mentioned_profile.canonical_name},
             )
 
         if mentioned_profile:
             item = inventory_map.get(mentioned_profile.canonical_name)
-            if item:
-                line = (
-                    f"{mentioned_profile.display_name_zh}: {stock_label(item.uncertain, item.total_quantity, item.unit, language)}。"
-                    if self._language(language) == "zh"
-                    else f"{mentioned_profile.display_name_en}: {stock_label(item.uncertain, item.total_quantity, item.unit, language)}."
-                )
-            else:
-                line = (
-                    f"{mentioned_profile.display_name_zh}: 当前没有确认库存。"
-                    if self._language(language) == "zh"
-                    else f"{mentioned_profile.display_name_en}: not confirmed in stock."
-                )
-            return ServiceResult(
+            status_text = (
+                stock_label(resolved_locale, item.uncertain, item.total_quantity, item.unit)
+                if item
+                else t(resolved_locale, "query.not_confirmed")
+            )
+            line = f"{mentioned_profile.display_name(resolved_locale)}: {status_text}{punctuation}"
+            return self._result(
                 status="ok",
-                language=self._language(language),
+                locale=resolved_locale,
                 response_markdown=bulletize([line]),
                 data={"item": mentioned_profile.canonical_name},
             )
@@ -516,154 +537,193 @@ class KitchenService:
             for item in inventory
             if target_category is None or item.item_group in target_category or item.category in target_category
         ]
-        if self._language(language) == "zh":
-            lines = [
-                f"{self._name(item, language)}: {stock_label(item.uncertain, item.total_quantity, item.unit, language)}"
-                for item in filtered
-            ] or ["没有找到符合条件的库存。"]
-        else:
-            lines = [
-                f"{self._name(item, language)}: {stock_label(item.uncertain, item.total_quantity, item.unit, language)}"
-                for item in filtered
-            ] or ["No matching inventory found."]
-        return ServiceResult(
+        lines = [
+            t(
+                resolved_locale,
+                "inventory.item_line",
+                name=self._name(item, resolved_locale),
+                quantity=stock_label(
+                    resolved_locale,
+                    item.uncertain,
+                    item.total_quantity,
+                    item.unit,
+                ),
+            )
+            for item in filtered
+        ] or [t(resolved_locale, "inventory.no_match")]
+        return self._result(
             status="ok",
-            language=self._language(language),
+            locale=resolved_locale,
             response_markdown=bulletize(lines),
-            data={"items": [self._summary_to_payload(item, language) for item in filtered]},
+            data={"items": [self._summary_to_payload(item, resolved_locale) for item in filtered]},
         )
 
     def plan_day(
         self,
-        language: str = "en",
+        locale: Optional[str] = None,
+        language: Optional[str] = "en",
         household_id: str = "default",
     ) -> ServiceResult:
-        suggestions, _, ranked = self._rank_recipes(household_id, language, limit=2)
+        resolved_locale = self._resolve_locale(locale, language)
+        suggestions, _, ranked = self._rank_recipes(
+            household_id=household_id,
+            locale=resolved_locale,
+            limit=2,
+        )
+        warnings = [
+            asdict(warning)
+            for warning in self.recipe_repository.warnings_for_locale(resolved_locale)
+        ]
+
         if not ranked or ranked[0][1] < 0.6:
             fallback = asdict(
                 self._fallback_request(
                     household_id=household_id,
-                    language=language,
-                    reason="No strong personal-recipe match from current inventory.",
+                    locale=resolved_locale,
+                    reason=t(resolved_locale, "plan.day.no_local_match"),
                 )
             )
-            lines = (
-                ["当前本地菜谱匹配度不足，需要联网搜索新菜视频。"]
-                if self._language(language) == "zh"
-                else ["Current local recipes are a weak match. Online video search is needed."]
-            )
-            return ServiceResult(
+            return self._result(
                 status="needs_web_search",
-                language=self._language(language),
-                response_markdown=bulletize(lines),
-                data={"suggestions": [], "fallback_request": fallback},
+                locale=resolved_locale,
+                response_markdown=bulletize([t(resolved_locale, "plan.day.no_local_match")]),
+                data={
+                    "suggestions": [],
+                    "fallback_request": fallback,
+                    "localization_warnings": warnings,
+                },
             )
 
         grocery_items = self._grocery_items(suggestions)
-        snack_suggestions = self._snack_suggestions(suggestions, language)
-        lines = []
+        snack_suggestions = self._snack_suggestions(suggestions, resolved_locale)
+        lines: list[str] = []
         for suggestion in suggestions:
-            if self._language(language) == "zh":
-                lines.append(
-                    f"{suggestion.title}: 蛋白质 {suggestion.macro_summary['protein']} / 纤维 {suggestion.macro_summary['fiber']} / 脂肪 {suggestion.macro_summary['fats']}"
+            lines.append(
+                t(
+                    resolved_locale,
+                    "plan.day.recipe_line",
+                    title=suggestion.title,
+                    protein=macro_label(resolved_locale, suggestion.macro_summary["protein"]),
+                    fiber=macro_label(resolved_locale, suggestion.macro_summary["fiber"]),
+                    fats=macro_label(resolved_locale, suggestion.macro_summary["fats"]),
                 )
-                if suggestion.missing_condiments:
-                    lines.append(f"缺少调味料: {', '.join(suggestion.missing_condiments)}")
-            else:
+            )
+            if suggestion.missing_condiments:
                 lines.append(
-                    f"{suggestion.title}: protein {suggestion.macro_summary['protein']} / fiber {suggestion.macro_summary['fiber']} / fats {suggestion.macro_summary['fats']}"
+                    t(
+                        resolved_locale,
+                        "plan.day.missing_condiments",
+                        items=join_display_list(resolved_locale, suggestion.missing_condiments),
+                    )
                 )
-                if suggestion.missing_condiments:
-                    lines.append(f"Missing condiments: {', '.join(suggestion.missing_condiments)}")
+        lines.append(
+            t(
+                resolved_locale,
+                "plan.day.snacks",
+                items=join_display_list(resolved_locale, snack_suggestions),
+            )
+        )
+        if grocery_items:
+            lines.append(
+                t(
+                    resolved_locale,
+                    "plan.day.grocery",
+                    items=join_display_list(resolved_locale, grocery_items),
+                )
+            )
 
-        if self._language(language) == "zh":
-            lines.append(f"加餐建议: {', '.join(snack_suggestions)}")
-            if grocery_items:
-                lines.append(f"待采购: {', '.join(grocery_items)}")
-        else:
-            lines.append(f"Snack ideas: {', '.join(snack_suggestions)}")
-            if grocery_items:
-                lines.append(f"Grocery add-ons: {', '.join(grocery_items)}")
-
-        return ServiceResult(
+        return self._result(
             status="ok",
-            language=self._language(language),
+            locale=resolved_locale,
             response_markdown=bulletize(lines),
             data={
                 "suggestions": [asdict(item) for item in suggestions],
                 "snack_suggestions": snack_suggestions,
                 "grocery_items": grocery_items,
+                "localization_warnings": warnings,
             },
         )
 
     def plan_weekend(
         self,
-        language: str = "en",
+        locale: Optional[str] = None,
+        language: Optional[str] = "en",
         household_id: str = "default",
     ) -> ServiceResult:
-        suggestions, inventory, _ = self._rank_recipes(household_id, language, limit=2)
-        expiring_focus = [self._name(item, language) for item in inventory if item.expiring_soon][:4]
-        grocery_items = self._grocery_items(suggestions)
-        restock_items = [alert["canonical_name"] for alert in self.restock_alerts(language, household_id).data["alerts"]]
-        grocery_items.extend(
-            [
-                lookup_profile(name).display_name_zh
-                if self._language(language) == "zh"
-                else lookup_profile(name).display_name_en
-                for name in restock_items
-            ]
+        resolved_locale = self._resolve_locale(locale, language)
+        suggestions, inventory, _ = self._rank_recipes(
+            household_id=household_id,
+            locale=resolved_locale,
+            limit=2,
         )
-        deduped_grocery = []
-        seen = set()
+        warnings = [
+            asdict(warning)
+            for warning in self.recipe_repository.warnings_for_locale(resolved_locale)
+        ]
+        expiring_focus = [self._name(item, resolved_locale) for item in inventory if item.expiring_soon][:4]
+        grocery_items = self._grocery_items(suggestions)
+        restock_items = [
+            alert["canonical_name"]
+            for alert in self.restock_alerts(locale=resolved_locale, household_id=household_id).data["alerts"]
+        ]
+        grocery_items.extend([lookup_profile(name).display_name(resolved_locale) for name in restock_items])
+
+        deduped_grocery: list[str] = []
+        seen: set[str] = set()
         for item in grocery_items:
             if item not in seen:
                 deduped_grocery.append(item)
                 seen.add(item)
 
-        if self._language(language) == "zh":
-            lines = [
-                f"周末优先处理: {', '.join(expiring_focus)}" if expiring_focus else "周末可按常规备餐。",
-                f"备餐建议: {', '.join(suggestion.title for suggestion in suggestions)}" if suggestions else "暂无强匹配菜谱。",
-                f"下周采购清单: {', '.join(deduped_grocery)}" if deduped_grocery else "下周暂无新增采购项。",
-            ]
-        else:
-            lines = [
-                f"Use first this weekend: {', '.join(expiring_focus)}" if expiring_focus else "Weekend prep can follow the regular rotation.",
-                f"Prep ideas: {', '.join(suggestion.title for suggestion in suggestions)}" if suggestions else "No strong local prep match yet.",
-                f"Next-week groceries: {', '.join(deduped_grocery)}" if deduped_grocery else "No extra groceries needed yet.",
-            ]
-        return ServiceResult(
+        lines = [
+            t(resolved_locale, "weekend.use_first", items=join_display_list(resolved_locale, expiring_focus))
+            if expiring_focus
+            else t(resolved_locale, "weekend.regular_rotation"),
+            t(
+                resolved_locale,
+                "weekend.prep_ideas",
+                items=join_display_list(resolved_locale, [suggestion.title for suggestion in suggestions]),
+            )
+            if suggestions
+            else t(resolved_locale, "weekend.no_prep_match"),
+            t(
+                resolved_locale,
+                "weekend.next_week_groceries",
+                items=join_display_list(resolved_locale, deduped_grocery),
+            )
+            if deduped_grocery
+            else t(resolved_locale, "weekend.no_extra_groceries"),
+        ]
+        return self._result(
             status="ok",
-            language=self._language(language),
+            locale=resolved_locale,
             response_markdown=bulletize(lines),
             data={
                 "prep_recipes": [asdict(item) for item in suggestions],
                 "expiring_focus": expiring_focus,
                 "grocery_items": deduped_grocery,
+                "localization_warnings": warnings,
             },
         )
 
     def expiry_alerts(
         self,
-        language: str = "en",
+        locale: Optional[str] = None,
+        language: Optional[str] = "en",
         household_id: str = "default",
         days_threshold: int = 2,
     ) -> ServiceResult:
+        resolved_locale = self._resolve_locale(locale, language)
         today = self._today()
         alerts: list[AlertItem] = []
         for item in self._batches_to_summary(
             household_id=household_id,
-            language=language,
+            locale=resolved_locale,
             expiring_within_days=days_threshold,
         ):
             if not item.expires_on or item.expires_on > today + timedelta(days=days_threshold):
                 continue
             severity = "expired" if item.expires_on < today else "soon"
-            reason = (
-                f"请在 {format_date(item.expires_on)} 前使用。"
-                if self._language(language) == "zh"
-                else f"Use by {format_date(item.expires_on)}."
-            )
             alerts.append(
                 AlertItem(
                     canonical_name=item.canonical_name,
@@ -671,28 +731,34 @@ class KitchenService:
                     display_name_zh=item.display_name_zh,
                     due_date=item.expires_on,
                     severity=severity,
-                    reason=reason,
+                    reason=t(
+                        resolved_locale,
+                        "alerts.expiry_reason",
+                        date=format_date(item.expires_on),
+                    ),
                 )
             )
 
-        lines = [f"{self._name(alert, language)}: {alert.reason}" for alert in alerts]
+        lines = [f"{self._name(alert, resolved_locale)}: {alert.reason}" for alert in alerts]
         if not lines:
-            lines = ["暂无临期食材。" if self._language(language) == "zh" else "No upcoming expiry alerts."]
-        return ServiceResult(
+            lines = [t(resolved_locale, "alerts.no_expiry")]
+        return self._result(
             status="ok",
-            language=self._language(language),
+            locale=resolved_locale,
             response_markdown=bulletize(lines),
             data={"alerts": [asdict(alert) for alert in alerts]},
         )
 
     def restock_alerts(
         self,
-        language: str = "en",
+        locale: Optional[str] = None,
+        language: Optional[str] = "en",
         household_id: str = "default",
     ) -> ServiceResult:
+        resolved_locale = self._resolve_locale(locale, language)
         inventory_map = {
             item.canonical_name: item
-            for item in self._batches_to_summary(household_id, language)
+            for item in self._batches_to_summary(household_id, resolved_locale)
         }
         alerts: list[AlertItem] = []
         for threshold in self.db.list_thresholds():
@@ -707,11 +773,6 @@ class KitchenService:
                     is_low = inventory_item.total_quantity <= threshold.threshold_quantity
             if not is_low:
                 continue
-            reason = (
-                f"当前低于补货线 {format_quantity(threshold.threshold_quantity, threshold.unit)}。"
-                if self._language(language) == "zh"
-                else f"Below the restock threshold of {format_quantity(threshold.threshold_quantity, threshold.unit)}."
-            )
             alerts.append(
                 AlertItem(
                     canonical_name=threshold.canonical_name,
@@ -719,42 +780,43 @@ class KitchenService:
                     display_name_zh=threshold.display_name_zh,
                     due_date=None,
                     severity="low",
-                    reason=reason,
+                    reason=t(
+                        resolved_locale,
+                        "alerts.restock_reason",
+                        threshold=format_quantity(threshold.threshold_quantity, threshold.unit),
+                    ),
                 )
             )
-        lines = [f"{self._name(alert, language)}: {alert.reason}" for alert in alerts]
+        lines = [f"{self._name(alert, resolved_locale)}: {alert.reason}" for alert in alerts]
         if not lines:
-            lines = ["暂无需要补货的常备品。" if self._language(language) == "zh" else "No staples need restocking."]
-        return ServiceResult(
+            lines = [t(resolved_locale, "alerts.no_restock")]
+        return self._result(
             status="ok",
-            language=self._language(language),
+            locale=resolved_locale,
             response_markdown=bulletize(lines),
             data={"alerts": [asdict(alert) for alert in alerts]},
         )
 
     def fallback_search_request(
         self,
-        language: str = "en",
+        locale: Optional[str] = None,
+        language: Optional[str] = "en",
         household_id: str = "default",
         preferred_ingredients: Optional[list[str]] = None,
-        reason: str = "Local recipes are insufficient.",
+        reason: Optional[str] = None,
     ) -> ServiceResult:
+        resolved_locale = self._resolve_locale(locale, language)
         request = asdict(
             self._fallback_request(
                 household_id=household_id,
-                language=language,
-                reason=reason,
+                locale=resolved_locale,
+                reason=reason or t(resolved_locale, "fallback.default_reason"),
                 preferred_ingredients=preferred_ingredients,
             )
         )
-        line = (
-            "需要 OpenClaw 联网搜索带视频教程的新菜谱。"
-            if self._language(language) == "zh"
-            else "OpenClaw should run an online search for a recipe with a video tutorial."
-        )
-        return ServiceResult(
+        return self._result(
             status="needs_web_search",
-            language=self._language(language),
-            response_markdown=bulletize([line]),
+            locale=resolved_locale,
+            response_markdown=bulletize([t(resolved_locale, "fallback.line")]),
             data={"search_request": request},
         )

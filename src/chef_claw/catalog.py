@@ -348,3 +348,23 @@ def lookup_profile(raw_name: str, unit: Optional[str] = None) -> IngredientProfi
 
 def get_threshold_payloads() -> list[dict[str, object]]:
     return [asdict(item) for item in DEFAULT_PANTRY_THRESHOLDS]
+
+
+def profile_aliases(profile: IngredientProfile) -> tuple[str, ...]:
+    seen: set[str] = set()
+    aliases: list[str] = []
+    for alias in profile.aliases():
+        normalized = alias.strip().lower()
+        if not normalized or normalized in seen:
+            continue
+        aliases.append(normalized)
+        seen.add(normalized)
+    return tuple(aliases)
+
+
+def find_profile_mentioned(text: str) -> Optional[IngredientProfile]:
+    normalized = text.lower()
+    for profile in INGREDIENT_PROFILES:
+        if any(alias in normalized for alias in profile_aliases(profile)):
+            return profile
+    return None

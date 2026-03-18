@@ -1,9 +1,10 @@
 from __future__ import annotations
 
+import json
 import sys
 import tempfile
 import unittest
-from datetime import date, datetime
+from datetime import datetime
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -12,7 +13,9 @@ if str(SRC) not in sys.path:
     sys.path.insert(0, str(SRC))
 
 from chef_claw.config import Settings
+from chef_claw.i18n import MESSAGES, message_placeholders, resolve_locale
 from chef_claw.parser import parse_checkin_text
+from chef_claw.recipes import RecipeRepository
 from chef_claw.service import KitchenService
 
 
@@ -28,6 +31,32 @@ class KitchenServiceTestCase(unittest.TestCase):
 
     def tearDown(self) -> None:
         self.temp_dir.cleanup()
+
+    def _seed_day_plan_inventory(self) -> None:
+        self.service.checkin(text="2 tomatoes")
+        self.service.checkin(
+            text="egg 6 piece expires 2026-03-30",
+            checked_in_at=datetime(2026, 3, 18, 9, 0, 0),
+        )
+        self.service.checkin(
+            text="cooking oil 1 bottle expires 2026-08-01, salt 1 pack expires 2027-01-01",
+            checked_in_at=datetime(2026, 3, 18, 9, 0, 0),
+        )
+
+    def test_locale_resolution(self) -> None:
+        self.assertEqual(resolve_locale("en"), "en")
+        self.assertEqual(resolve_locale("en-US"), "en")
+        self.assertEqual(resolve_locale("zh"), "zh-Hans")
+        self.assertEqual(resolve_locale("zh-CN"), "zh-Hans")
+        self.assertEqual(resolve_locale("zh-Hans"), "zh-Hans")
+
+    def test_message_catalog_parity(self) -> None:
+        self.assertEqual(set(MESSAGES["en"]), set(MESSAGES["zh-Hans"]))
+        for key in MESSAGES["en"]:
+            self.assertEqual(
+                message_placeholders("en", key),
+                message_placeholders("zh-Hans", key),
+            )
 
     def test_parse_english_checkin(self) -> None:
         items = parse_checkin_text("2 tomatoes, spinach 1 bag", datetime(2026, 3, 18, 9, 0, 0))
@@ -49,14 +78,23 @@ class KitchenServiceTestCase(unittest.TestCase):
             checked_in_at=datetime(2026, 3, 18, 9, 0, 0),
         )
         self.assertEqual(result.status, "ok")
+        self.assertEqual(result.locale, "en")
         recorded = result.data["recorded_items"][0]
         self.assertEqual(recorded["recommended_use_by"], "2026-03-22")
 
     def test_packaged_item_without_expiry_needs_follow_up(self) -> None:
-        result = self.service.checkin(text="milk 1 carton")
+        result = self.service.checkin(text="milk 1 carton", locale="en-US")
         self.assertEqual(result.status, "needs_user_input")
         self.assertEqual(len(result.data["recorded_items"]), 0)
         self.assertIn("expiration date", result.data["follow_up_questions"][0]["question"])
+        self.assertEqual(result.locale, "en")
+
+    def test_packaged_item_follow_up_is_localized_in_chinese(self) -> None:
+        result = self.service.checkin(text="牛奶 1 盒", language="zh")
+        self.assertEqual(result.status, "needs_user_input")
+        self.assertEqual(result.locale, "zh-Hans")
+        self.assertEqual(result.language, "zh")
+        self.assertIn("请提供", result.data["follow_up_questions"][0]["question"])
 
     def test_quantity_updates_are_aggregated(self) -> None:
         self.service.checkin(
@@ -77,20 +115,30 @@ class KitchenServiceTestCase(unittest.TestCase):
         self.assertIn("Spinach", result.response_markdown)
         self.assertIn("Tomato", result.response_markdown)
 
+    def test_chinese_inventory_query_matches_same_semantics(self) -> None:
+        self.service.checkin(text="spinach 1 bag, tomato 2")
+        result = self.service.query_inventory("还有什么蔬菜？", locale="zh-CN")
+        self.assertEqual(result.locale, "zh-Hans")
+        self.assertIn("菠菜", result.response_markdown)
+        self.assertIn("西红柿", result.response_markdown)
+
     def test_day_plan_prefers_local_recipe_and_includes_snacks(self) -> None:
-        self.service.checkin(text="2 tomatoes")
-        self.service.checkin(
-            text="egg 6 piece expires 2026-03-30",
-            checked_in_at=datetime(2026, 3, 18, 9, 0, 0),
-        )
-        self.service.checkin(
-            text="cooking oil 1 bottle expires 2026-08-01, salt 1 pack expires 2027-01-01",
-            checked_in_at=datetime(2026, 3, 18, 9, 0, 0),
-        )
+        self._seed_day_plan_inventory()
         result = self.service.plan_day()
         self.assertEqual(result.status, "ok")
         self.assertEqual(result.data["suggestions"][0]["recipe_id"], "tomato-egg-stir-fry")
         self.assertTrue(result.data["snack_suggestions"])
+        self.assertEqual(result.data["localization_warnings"], [])
+
+    def test_day_plan_is_fully_localized_in_chinese(self) -> None:
+        self._seed_day_plan_inventory()
+        result = self.service.plan_day(language="zh")
+        self.assertEqual(result.status, "ok")
+        self.assertEqual(result.locale, "zh-Hans")
+        self.assertIn("番茄炒蛋", result.response_markdown)
+        self.assertIn("加餐建议", result.response_markdown)
+        self.assertNotIn("protein", result.response_markdown)
+        self.assertNotIn("Snack ideas", result.response_markdown)
 
     def test_uncertain_inventory_is_not_treated_as_available(self) -> None:
         self.service.checkin(text="spinach")
@@ -111,9 +159,14 @@ class KitchenServiceTestCase(unittest.TestCase):
         self.assertEqual(restock_one.data, restock_two.data)
 
     def test_fallback_search_request_contract(self) -> None:
-        result = self.service.fallback_search_request(preferred_ingredients=["spinach", "tofu"])
+        result = self.service.fallback_search_request(
+            preferred_ingredients=["spinach", "tofu"],
+            locale="zh-Hans",
+        )
         self.assertEqual(result.status, "needs_web_search")
         request = result.data["search_request"]
+        self.assertEqual(request["locale"], "zh-Hans")
+        self.assertEqual(request["language"], "zh")
         self.assertTrue(request["require_video"])
         self.assertIn("video_url", request["expected_fields"])
 
@@ -122,6 +175,56 @@ class KitchenServiceTestCase(unittest.TestCase):
         result = self.service.plan_weekend()
         self.assertEqual(result.status, "ok")
         self.assertIn("grocery_items", result.data)
+
+    def test_recipe_loader_accepts_zh_alias_and_flags_incomplete_locale(self) -> None:
+        with tempfile.TemporaryDirectory() as recipe_dir_name:
+            recipe_dir = Path(recipe_dir_name)
+            (recipe_dir / "good.json").write_text(
+                json.dumps(
+                    {
+                        "recipe_id": "good",
+                        "title": "Good Recipe",
+                        "title_translations": {"en": "Good Recipe", "zh": "好菜"},
+                        "language": "en",
+                        "ingredients": [{"name": "tomato", "quantity": 1, "unit": "piece"}],
+                        "condiments": [],
+                        "steps": [{"en": "Cook it.", "zh": "做就行。"}],
+                        "macro_summary": {"protein": "low", "fiber": "low", "fats": "low"},
+                    },
+                    ensure_ascii=False,
+                ),
+                encoding="utf-8",
+            )
+            (recipe_dir / "bad.json").write_text(
+                json.dumps(
+                    {
+                        "recipe_id": "bad",
+                        "title": "Bad Recipe",
+                        "title_translations": {"en": "Bad Recipe"},
+                        "language": "en",
+                        "ingredients": [{"name": "spinach", "quantity": 1, "unit": "bag"}],
+                        "condiments": [],
+                        "steps": [{"en": "Cook it."}],
+                        "macro_summary": {"protein": "low", "fiber": "low", "fats": "low"},
+                    },
+                    ensure_ascii=False,
+                ),
+                encoding="utf-8",
+            )
+
+            repository = RecipeRepository(recipe_dir)
+            zh_recipes = repository.recipes_for_locale("zh-Hans")
+            warnings = repository.warnings_for_locale("zh-Hans")
+
+            self.assertEqual([recipe.recipe_id for recipe in zh_recipes], ["good"])
+            self.assertTrue(any(warning.recipe_id == "bad" for warning in warnings))
+
+    def test_backward_compat_language_argument(self) -> None:
+        self.service.checkin(text="spinach 1 bag")
+        result = self.service.get_inventory(language="zh")
+        self.assertEqual(result.locale, "zh-Hans")
+        self.assertEqual(result.language, "zh")
+        self.assertIn("当前库存", result.response_markdown)
 
 
 if __name__ == "__main__":

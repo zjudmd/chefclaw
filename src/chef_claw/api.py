@@ -4,6 +4,7 @@ from datetime import date, datetime
 from typing import Any, Optional
 
 from .config import get_settings
+from .i18n import legacy_language, resolve_locale
 from .service import KitchenService
 
 
@@ -24,13 +25,15 @@ def create_app():
 
     class CheckinRequest(BaseModel):
         text: str = Field(..., description="Normalized ingredient check-in text.")
-        language: str = "en"
+        locale: Optional[str] = None
+        language: Optional[str] = "en"
         household_id: str = "default"
         checked_in_at: Optional[datetime] = None
         parsed_items: Optional[list[ParsedItemInput]] = None
 
     class BaseRequest(BaseModel):
-        language: str = "en"
+        locale: Optional[str] = None
+        language: Optional[str] = "en"
         household_id: str = "default"
 
     class ExpiryAlertRequest(BaseRequest):
@@ -38,13 +41,17 @@ def create_app():
 
     class FallbackSearchRequestBody(BaseRequest):
         preferred_ingredients: Optional[list[str]] = None
-        reason: str = "Local recipes are insufficient."
+        reason: Optional[str] = None
 
     class ServiceResponse(BaseModel):
         status: str
+        locale: str
         language: str
         response_markdown: str
         data: dict[str, Any]
+
+    def request_locale(locale: Optional[str], language: Optional[str]) -> str:
+        return resolve_locale(locale or language)
 
     settings = get_settings()
     service = KitchenService(settings)
@@ -56,9 +63,11 @@ def create_app():
 
     @app.get("/health", response_model=ServiceResponse)
     def health() -> dict[str, Any]:
+        locale = "en"
         return {
             "status": "ok",
-            "language": "en",
+            "locale": locale,
+            "language": legacy_language(locale),
             "response_markdown": "- Service is healthy.",
             "data": {
                 "database_path": str(settings.database_path),
@@ -68,8 +77,10 @@ def create_app():
 
     @app.post("/checkin", response_model=ServiceResponse)
     def checkin(request: CheckinRequest) -> dict[str, Any]:
+        resolved_locale = request_locale(request.locale, request.language)
         result = service.checkin(
             text=request.text,
+            locale=resolved_locale,
             language=request.language,
             household_id=request.household_id,
             checked_in_at=request.checked_in_at,
@@ -81,6 +92,7 @@ def create_app():
         )
         return {
             "status": result.status,
+            "locale": result.locale,
             "language": result.language,
             "response_markdown": result.response_markdown,
             "data": result.data,
@@ -88,13 +100,16 @@ def create_app():
 
     @app.get("/inventory", response_model=ServiceResponse)
     def inventory(
-        language: str = Query("en"),
+        locale: Optional[str] = Query(None),
+        language: Optional[str] = Query("en"),
         household_id: str = Query("default"),
         category: Optional[str] = Query(None),
         expiring_within_days: Optional[int] = Query(None),
         only_available: bool = Query(True),
     ) -> dict[str, Any]:
+        resolved_locale = request_locale(locale, language)
         result = service.get_inventory(
+            locale=resolved_locale,
             language=language,
             household_id=household_id,
             category=category,
@@ -103,6 +118,7 @@ def create_app():
         )
         return {
             "status": result.status,
+            "locale": result.locale,
             "language": result.language,
             "response_markdown": result.response_markdown,
             "data": result.data,
@@ -111,16 +127,20 @@ def create_app():
     @app.get("/inventory/query", response_model=ServiceResponse)
     def inventory_query(
         question: str = Query(...),
-        language: str = Query("en"),
+        locale: Optional[str] = Query(None),
+        language: Optional[str] = Query("en"),
         household_id: str = Query("default"),
     ) -> dict[str, Any]:
+        resolved_locale = request_locale(locale, language)
         result = service.query_inventory(
             question=question,
+            locale=resolved_locale,
             language=language,
             household_id=household_id,
         )
         return {
             "status": result.status,
+            "locale": result.locale,
             "language": result.language,
             "response_markdown": result.response_markdown,
             "data": result.data,
@@ -128,12 +148,15 @@ def create_app():
 
     @app.post("/plan/day", response_model=ServiceResponse)
     def day_plan(request: BaseRequest) -> dict[str, Any]:
+        resolved_locale = request_locale(request.locale, request.language)
         result = service.plan_day(
+            locale=resolved_locale,
             language=request.language,
             household_id=request.household_id,
         )
         return {
             "status": result.status,
+            "locale": result.locale,
             "language": result.language,
             "response_markdown": result.response_markdown,
             "data": result.data,
@@ -141,12 +164,15 @@ def create_app():
 
     @app.post("/plan/weekend", response_model=ServiceResponse)
     def weekend_plan(request: BaseRequest) -> dict[str, Any]:
+        resolved_locale = request_locale(request.locale, request.language)
         result = service.plan_weekend(
+            locale=resolved_locale,
             language=request.language,
             household_id=request.household_id,
         )
         return {
             "status": result.status,
+            "locale": result.locale,
             "language": result.language,
             "response_markdown": result.response_markdown,
             "data": result.data,
@@ -154,13 +180,16 @@ def create_app():
 
     @app.post("/alerts/expiry", response_model=ServiceResponse)
     def expiry_alerts(request: ExpiryAlertRequest) -> dict[str, Any]:
+        resolved_locale = request_locale(request.locale, request.language)
         result = service.expiry_alerts(
+            locale=resolved_locale,
             language=request.language,
             household_id=request.household_id,
             days_threshold=request.days_threshold,
         )
         return {
             "status": result.status,
+            "locale": result.locale,
             "language": result.language,
             "response_markdown": result.response_markdown,
             "data": result.data,
@@ -168,12 +197,15 @@ def create_app():
 
     @app.post("/alerts/restock", response_model=ServiceResponse)
     def restock_alerts(request: BaseRequest) -> dict[str, Any]:
+        resolved_locale = request_locale(request.locale, request.language)
         result = service.restock_alerts(
+            locale=resolved_locale,
             language=request.language,
             household_id=request.household_id,
         )
         return {
             "status": result.status,
+            "locale": result.locale,
             "language": result.language,
             "response_markdown": result.response_markdown,
             "data": result.data,
@@ -183,7 +215,9 @@ def create_app():
     def fallback_search_request(
         request: FallbackSearchRequestBody,
     ) -> dict[str, Any]:
+        resolved_locale = request_locale(request.locale, request.language)
         result = service.fallback_search_request(
+            locale=resolved_locale,
             language=request.language,
             household_id=request.household_id,
             preferred_ingredients=request.preferred_ingredients,
@@ -191,6 +225,7 @@ def create_app():
         )
         return {
             "status": result.status,
+            "locale": result.locale,
             "language": result.language,
             "response_markdown": result.response_markdown,
             "data": result.data,
