@@ -91,6 +91,85 @@ class KitchenService:
     def _name(self, obj: object, locale: LocaleCode) -> str:
         return localize_name(obj, locale)
 
+    def _inventory_bucket_key(self, item: InventorySummaryItem) -> str:
+        prepared_name_markers = (
+            "leftover",
+            "cooked ",
+            "prepared ",
+            "meal",
+            "salad",
+            "sandwich",
+            "soup",
+            "stew",
+            "rice bowl",
+        )
+        if item.item_group in {"prepared", "ready_to_eat", "leftover", "meal", "snack"} or any(
+            marker in item.canonical_name for marker in prepared_name_markers
+        ):
+            return "foods"
+        if item.category in {"produce", "protein", "condiment"}:
+            return "ingredients"
+        if item.item_group in {
+            "vegetable",
+            "leafy_green",
+            "aromatic",
+            "meat",
+            "seafood",
+            "protein",
+            "dairy",
+            "grain",
+            "condiment",
+        }:
+            return "ingredients"
+        return "other"
+
+    def _inventory_grouped_payload(
+        self,
+        items: list[InventorySummaryItem],
+        locale: LocaleCode,
+    ) -> list[dict[str, object]]:
+        groups: dict[str, list[dict[str, object]]] = {"ingredients": [], "foods": [], "other": []}
+        for item in items:
+            groups[self._inventory_bucket_key(item)].append(self._summary_to_payload(item, locale))
+        ordered = []
+        for key in ("ingredients", "foods", "other"):
+            if groups[key]:
+                ordered.append(
+                    {
+                        "key": key,
+                        "label": t(locale, f"inventory.section.{key}"),
+                        "items": groups[key],
+                    }
+                )
+        return ordered
+
+    def _inventory_markdown(
+        self,
+        items: list[InventorySummaryItem],
+        locale: LocaleCode,
+    ) -> str:
+        grouped_items: dict[str, list[str]] = {"ingredients": [], "foods": [], "other": []}
+        for item in items:
+            grouped_items[self._inventory_bucket_key(item)].append(
+                t(
+                    locale,
+                    "inventory.item_line_with_date" if item.expires_on else "inventory.item_line",
+                    name=self._name(item, locale),
+                    quantity=stock_label(locale, item.uncertain, item.total_quantity, item.unit),
+                    date=format_date(item.expires_on),
+                )
+            )
+
+        sections = []
+        for key in ("ingredients", "foods", "other"):
+            lines = grouped_items[key]
+            if not lines:
+                continue
+            sections.append(f"**{t(locale, f'inventory.section.{key}')}**\n{bulletize(lines)}")
+        if not sections:
+            sections.append(bulletize([t(locale, "inventory.no_filter_match")]))
+        return f"**{t(locale, 'inventory.header')}**\n" + "\n\n".join(sections)
+
     def _compute_recommended_use_by(
         self,
         item_name: str,
@@ -528,27 +607,14 @@ class KitchenService:
             expiring_within_days=expiring_within_days,
             only_available=only_available,
         )
-        lines = [
-            t(
-                resolved_locale,
-                "inventory.item_line_with_date" if item.expires_on else "inventory.item_line",
-                name=self._name(item, resolved_locale),
-                quantity=stock_label(
-                    resolved_locale,
-                    item.uncertain,
-                    item.total_quantity,
-                    item.unit,
-                ),
-                date=format_date(item.expires_on),
-            )
-            for item in items
-        ] or [t(resolved_locale, "inventory.no_filter_match")]
+        grouped_items = self._inventory_grouped_payload(items, resolved_locale)
         return self._result(
             status="ok",
             locale=resolved_locale,
-            response_markdown=f"**{t(resolved_locale, 'inventory.header')}**\n{bulletize(lines)}",
+            response_markdown=self._inventory_markdown(items, resolved_locale),
             data={
                 "items": [self._summary_to_payload(item, resolved_locale) for item in items],
+                "grouped_items": grouped_items,
                 "batches": [self._serialize_batch(batch, resolved_locale) for batch in batches],
             },
         )

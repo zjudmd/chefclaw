@@ -186,6 +186,28 @@ class KitchenServiceTestCase(unittest.TestCase):
         self.assertEqual(inventory.data["items"], [])
         self.assertEqual(inventory.data["batches"], [])
 
+    def test_inventory_response_is_grouped_by_bucket(self) -> None:
+        self.service.checkin(text="egg 6 piece expires 2026-03-30")
+        self.service.checkin(text="rice 1 kg expires 2026-08-01")
+
+        result = self.service.get_inventory()
+
+        self.assertIn("**Ingredients**", result.response_markdown)
+        self.assertNotIn("**Prepared foods**", result.response_markdown)
+        grouped = result.data["grouped_items"]
+        self.assertEqual(grouped[0]["key"], "ingredients")
+        self.assertEqual(len(grouped[0]["items"]), 2)
+
+    def test_inventory_response_groups_prepared_foods_separately(self) -> None:
+        self.service.checkin(text="leftover pasta 1 box expires 2026-03-20")
+
+        result = self.service.get_inventory()
+
+        self.assertIn("**Prepared foods**", result.response_markdown)
+        grouped = result.data["grouped_items"]
+        self.assertEqual(grouped[0]["key"], "foods")
+        self.assertEqual(grouped[0]["items"][0]["canonical_name"], "leftover pasta")
+
     def test_query_vegetables_left(self) -> None:
         self.service.checkin(text="spinach 1 bag, tomato 2")
         result = self.service.query_inventory("What vegetables do we have left?")
