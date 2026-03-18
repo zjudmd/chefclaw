@@ -181,7 +181,42 @@ class KitchenService:
             return None
         return (checked_in_at + timedelta(days=profile.default_days)).date()
 
+    def _infer_storage_state(self, source_text: str) -> str:
+        lowered = source_text.lower()
+        if any(token in lowered for token in ("frozen", "freezer", "冷冻", "冷凍")):
+            return "frozen"
+        if any(token in lowered for token in ("fridge", "refrigerated", "冷藏")):
+            return "fridge"
+        return "room_temp"
+
+    def _suggest_frozen_use_by(self, checked_in_at: datetime, item_name: str) -> date:
+        lowered = item_name.lower()
+        months = 6
+        if any(token in lowered for token in ("shrimp", "scallop", "fish", "cod", "fillet", "dumpling")):
+            months = 6
+        elif any(token in lowered for token in ("vegetable", "vege", "veg")):
+            months = 8
+        elif any(token in lowered for token in ("sausage", "dried shrimp", "sesame")):
+            months = 12
+        return (checked_in_at + timedelta(days=30 * months)).date()
+
+    def _batch_metadata(self, source_text: str, expiration_date: Optional[date], recommended_use_by: Optional[date]) -> tuple[str, str, str]:
+        storage_state = self._infer_storage_state(source_text)
+        if expiration_date is not None:
+            expiry_confidence = "exact"
+        elif recommended_use_by is not None:
+            expiry_confidence = "suggested"
+        else:
+            expiry_confidence = "unknown"
+        use_horizon = "long" if storage_state == "frozen" else "normal"
+        return storage_state, expiry_confidence, use_horizon
+
     def _serialize_batch(self, batch: InventoryBatch, locale: LocaleCode) -> dict[str, object]:
+        storage_state, expiry_confidence, use_horizon = self._batch_metadata(
+            batch.source_text,
+            batch.expiration_date,
+            batch.recommended_use_by,
+        )
         return {
             "batch_id": batch.batch_id,
             "name": self._name(batch, locale),
@@ -196,6 +231,9 @@ class KitchenService:
             "expiration_date": format_date(batch.expiration_date),
             "recommended_use_by": format_date(batch.recommended_use_by),
             "uncertain": batch.uncertain,
+            "storage_state": storage_state,
+            "expiry_confidence": expiry_confidence,
+            "use_horizon": use_horizon,
         }
 
     def _serialize_recipe(self, recipe, locale: LocaleCode) -> dict[str, object]:
@@ -265,6 +303,11 @@ class KitchenService:
             only_available=only_available,
         ):
             relevant_date = batch.relevant_date
+            storage_state, expiry_confidence, use_horizon = self._batch_metadata(
+                batch.source_text,
+                batch.expiration_date,
+                batch.recommended_use_by,
+            )
             existing = summary.get(batch.canonical_name)
             if not existing:
                 summary[batch.canonical_name] = InventorySummaryItem(
@@ -281,6 +324,9 @@ class KitchenService:
                     batch_ids=[batch.batch_id],
                     expires_on=relevant_date,
                     expiring_soon=False,
+                    storage_state=storage_state,
+                    expiry_confidence=expiry_confidence,
+                    use_horizon=use_horizon,
                 )
                 continue
 
@@ -298,6 +344,13 @@ class KitchenService:
                 existing.expires_on is None or relevant_date < existing.expires_on
             ):
                 existing.expires_on = relevant_date
+            if batch.storage_state == "frozen":
+                existing.storage_state = "frozen"
+                existing.use_horizon = "long"
+            if existing.expiry_confidence != "exact" and batch.expiry_confidence == "exact":
+                existing.expiry_confidence = "exact"
+            elif existing.expiry_confidence == "unknown" and batch.expiry_confidence == "suggested":
+                existing.expiry_confidence = "suggested"
 
         items = list(summary.values())
         threshold_map = {
@@ -335,6 +388,9 @@ class KitchenService:
             "expires_on": format_date(item.expires_on),
             "expiring_soon": item.expiring_soon,
             "low_stock": item.low_stock,
+            "storage_state": item.storage_state,
+            "expiry_confidence": item.expiry_confidence,
+            "use_horizon": item.use_horizon,
         }
 
     def _ingredient_available(
@@ -527,7 +583,10 @@ class KitchenService:
         follow_ups: list[dict[str, str]] = []
 
         for item in items:
-            if item.freshness_type == "packaged" and item.expiration_date is None:
+            storage_state = self._infer_storage_state(item.source_text)
+            if item.expiration_date is None and storage_state == "frozen":
+                item.recommended_use_by = self._suggest_frozen_use_by(item.checked_in_at, item.canonical_name)
+            elif item.freshness_type == "packaged" and item.expiration_date is None:
                 follow_ups.append(
                     {
                         "item_name": self._name(item, resolved_locale),
@@ -539,7 +598,7 @@ class KitchenService:
                     }
                 )
                 continue
-            if item.freshness_type == "fresh" and item.expiration_date is None:
+            if item.freshness_type == "fresh" and item.expiration_date is None and storage_state != "frozen":
                 item.recommended_use_by = self._compute_recommended_use_by(
                     item.canonical_name,
                     item.freshness_type,
@@ -957,17 +1016,23 @@ class KitchenService:
             source_text = str(batch_patch["source_text"])
 
         profile = lookup_profile(raw_name, unit)
-        if profile.freshness_type == "packaged" and expiration_date is None:
+        storage_state = self._infer_storage_state(source_text)
+        if profile.freshness_type == "packaged" and expiration_date is None and storage_state != "frozen":
             raise ValueError("packaged items require an expiration_date")
 
         recommended_use_by = None
-        if profile.freshness_type == "fresh" and expiration_date is None:
+        if expiration_date is None and storage_state == "frozen":
+            recommended_use_by = self._suggest_frozen_use_by(checked_in_at, profile.canonical_name)
+        elif profile.freshness_type == "fresh" and expiration_date is None:
             recommended_use_by = self._compute_recommended_use_by(
                 profile.canonical_name,
                 profile.freshness_type,
                 checked_in_at,
             )
 
+        storage_state = self._infer_storage_state(source_text)
+        if profile.freshness_type == "packaged" and expiration_date is None and storage_state == "frozen":
+            recommended_use_by = self._suggest_frozen_use_by(checked_in_at, profile.canonical_name)
         updated_batch = InventoryBatch(
             batch_id=batch.batch_id,
             household_id=batch.household_id,
@@ -984,6 +1049,9 @@ class KitchenService:
             recommended_use_by=recommended_use_by,
             uncertain=uncertain,
             source_text=source_text,
+            storage_state=storage_state,
+            expiry_confidence="exact" if expiration_date is not None else ("suggested" if recommended_use_by is not None else "unknown"),
+            use_horizon="long" if storage_state == "frozen" else "normal",
         )
         self.db.update_batch(updated_batch)
         self.db.record_event(

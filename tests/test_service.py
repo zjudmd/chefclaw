@@ -208,6 +208,31 @@ class KitchenServiceTestCase(unittest.TestCase):
         self.assertEqual(grouped[0]["key"], "foods")
         self.assertEqual(grouped[0]["items"][0]["canonical_name"], "leftover pasta")
 
+    def test_frozen_packaged_item_can_save_with_suggested_use_by(self) -> None:
+        result = self.service.checkin(text="dumpling 2 bag frozen")
+
+        self.assertEqual(result.status, "ok")
+        recorded = result.data["recorded_items"][0]
+        self.assertEqual(recorded["storage_state"], "frozen")
+        self.assertEqual(recorded["expiry_confidence"], "suggested")
+        self.assertEqual(recorded["use_horizon"], "long")
+        self.assertNotEqual(recorded["recommended_use_by"], "-")
+
+    def test_non_frozen_packaged_item_still_needs_expiration_date(self) -> None:
+        result = self.service.checkin(text="yam noodle 1 pack")
+
+        self.assertEqual(result.status, "needs_user_input")
+        self.assertTrue(result.data["follow_up_questions"])
+
+    def test_frozen_metadata_surfaces_in_inventory_summary(self) -> None:
+        self.service.checkin(text="mixed vegetables 1 pack frozen")
+
+        inventory = self.service.get_inventory()
+        item = next(entry for entry in inventory.data["items"] if "mixed" in entry["canonical_name"])
+        self.assertEqual(item["storage_state"], "frozen")
+        self.assertEqual(item["expiry_confidence"], "suggested")
+        self.assertEqual(item["use_horizon"], "long")
+
     def test_query_vegetables_left(self) -> None:
         self.service.checkin(text="spinach 1 bag, tomato 2")
         result = self.service.query_inventory("What vegetables do we have left?")

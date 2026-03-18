@@ -85,6 +85,9 @@ class InventoryBatch:
     recommended_use_by: Optional[date]
     uncertain: bool
     source_text: str
+    storage_state: str = "room_temp"
+    expiry_confidence: str = "exact"
+    use_horizon: str = "normal"
 
     @property
     def relevant_date(self) -> Optional[date]:
@@ -110,6 +113,9 @@ class InventorySummaryItem:
     expires_on: Optional[date]
     expiring_soon: bool
     low_stock: bool = False
+    storage_state: str = "room_temp"
+    expiry_confidence: str = "exact"
+    use_horizon: str = "normal"
 
     def display_name(self, locale: str) -> str:
         return self.display_name_zh if _is_zh_locale(locale) else self.display_name_en
